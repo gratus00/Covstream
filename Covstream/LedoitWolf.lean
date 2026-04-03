@@ -2,14 +2,17 @@ import Covstream.Welford
 
 /-!
 `Covstream.LedoitWolf` builds the structural shrinkage layer on top of the
-Welford covariance model.
+exact Welford covariance model.
 
-This file defines:
+Read this file in three stages:
 
-1. The standard scaled-identity shrinkage target.
-2. Convex shrinkage between a covariance matrix and its target.
-3. Symmetry and PSD-preservation lemmas.
-4. API-ready helpers that clamp user-supplied coefficients into `[0, 1]`.
+1. `ledoitWolfTarget`
+2. `ledoitWolfShrink`
+3. `fitLedoitWolf_eq_classicalLedoitWolf`
+
+The key idea is simple: shrink a covariance matrix toward the scaled identity
+matrix `μ I`, then prove symmetry and PSD are preserved under the expected
+assumptions.
 -/
 
 namespace Covstream
@@ -20,11 +23,25 @@ section LedoitWolf
 noncomputable def diagonalMean {k : Nat} (S : CovMatrix k) : Real :=
   (∑ i : Fin k, S i i) / (k : Real)
 
-/-- Scalar multiple of the identity matrix, represented as a function. -/
+theorem diagonalMean_nonneg_of_psd {k : Nat}
+    (hk : 0 < k)
+    (S : CovMatrix k)
+    (hS : PositiveSemidefinite S) :
+    0 ≤ diagonalMean S := by
+  unfold diagonalMean
+  have hsum : 0 ≤ ∑ i : Fin k, S i i := by
+    apply Finset.sum_nonneg
+    intro i _
+    exact psd_diagonal_nonneg S hS i
+  have hkR : 0 < (k : Real) := by
+    exact_mod_cast hk
+  exact div_nonneg hsum (le_of_lt hkR)
+
+/-- Scalar multiple of the identity matrix, represented as a coordinate function. -/
 def scaledIdentity {k : Nat} (μ : Real) : CovMatrix k :=
   fun i j => if i = j then μ else 0
 
-theorem scaledIdentity_symm {k : Nat}
+theorem scaledIdentity_isSymmetric {k : Nat}
     (μ : Real) :
     Symmetric (scaledIdentity (k := k) μ) := by
   intro i j
@@ -37,7 +54,7 @@ theorem scaledIdentity_symm {k : Nat}
     simp [scaledIdentity, h, h']
 
 theorem quadraticForm_scaledIdentity {k : Nat}
-    (μ : Real) (v : Fin k -> Real) :
+    (μ : Real) (v : Obs k) :
     quadraticForm (scaledIdentity (k := k) μ) v = μ * ∑ i : Fin k, (v i) ^ 2 := by
   classical
   unfold quadraticForm scaledIdentity
@@ -47,7 +64,7 @@ theorem quadraticForm_scaledIdentity {k : Nat}
   intro i _
   ring
 
-theorem scaledIdentity_psd {k : Nat}
+theorem scaledIdentity_isPsd {k : Nat}
     (μ : Real) (hμ : 0 ≤ μ) :
     PositiveSemidefinite (scaledIdentity (k := k) μ) := by
   intro v
@@ -57,24 +74,33 @@ theorem scaledIdentity_psd {k : Nat}
   intro i _
   exact sq_nonneg (v i)
 
+/-- The standard Ledoit-Wolf target for linear shrinkage: `μ I`. -/
 noncomputable def ledoitWolfTarget {k : Nat} (S : CovMatrix k) : CovMatrix k :=
   scaledIdentity (diagonalMean S)
 
-theorem ledoitWolfTarget_symm {k : Nat}
+theorem ledoitWolfTarget_isSymmetric {k : Nat}
     (S : CovMatrix k) :
     Symmetric (ledoitWolfTarget S) := by
-  simpa [ledoitWolfTarget] using scaledIdentity_symm (k := k) (diagonalMean S)
+  simpa [ledoitWolfTarget] using scaledIdentity_isSymmetric (k := k) (diagonalMean S)
 
-theorem ledoitWolfTarget_psd {k : Nat}
+theorem ledoitWolfTarget_isPsd {k : Nat}
     (S : CovMatrix k)
     (hμ : 0 ≤ diagonalMean S) :
     PositiveSemidefinite (ledoitWolfTarget S) := by
-  simpa [ledoitWolfTarget] using scaledIdentity_psd (k := k) (diagonalMean S) hμ
+  simpa [ledoitWolfTarget] using scaledIdentity_isPsd (k := k) (diagonalMean S) hμ
 
+theorem ledoitWolfTarget_isPsd_of_psd {k : Nat}
+    (hk : 0 < k)
+    (S : CovMatrix k)
+    (hS : PositiveSemidefinite S) :
+    PositiveSemidefinite (ledoitWolfTarget S) := by
+  exact ledoitWolfTarget_isPsd S (diagonalMean_nonneg_of_psd hk S hS)
+
+/-- Convex interpolation between a covariance matrix and a target matrix. -/
 def shrinkMatrix {k : Nat} (α : Real) (S T : CovMatrix k) : CovMatrix k :=
   fun i j => (1 - α) * S i j + α * T i j
 
-theorem shrinkMatrix_symm {k : Nat}
+theorem shrinkMatrix_isSymmetric {k : Nat}
     (α : Real) (S T : CovMatrix k)
     (hS : Symmetric S) (hT : Symmetric T) :
     Symmetric (shrinkMatrix α S T) := by
@@ -82,7 +108,7 @@ theorem shrinkMatrix_symm {k : Nat}
   simp [shrinkMatrix, hS i j, hT i j]
 
 theorem quadraticForm_shrinkMatrix {k : Nat}
-    (α : Real) (S T : CovMatrix k) (v : Fin k -> Real) :
+    (α : Real) (S T : CovMatrix k) (v : Obs k) :
     quadraticForm (shrinkMatrix α S T) v
       = (1 - α) * quadraticForm S v + α * quadraticForm T v := by
   calc
@@ -97,7 +123,7 @@ theorem quadraticForm_shrinkMatrix {k : Nat}
           unfold quadraticForm
           simp [Finset.mul_sum, Finset.sum_add_distrib]
 
-theorem shrinkMatrix_psd {k : Nat}
+theorem shrinkMatrix_preservesPsd {k : Nat}
     (α : Real) (S T : CovMatrix k)
     (hα0 : 0 ≤ α) (hα1 : α ≤ 1)
     (hS : PositiveSemidefinite S)
@@ -110,26 +136,35 @@ theorem shrinkMatrix_psd {k : Nat}
   have h1mα : 0 ≤ 1 - α := by linarith
   nlinarith
 
+/-- Ledoit-Wolf shrinkage toward the scaled-identity target. -/
 noncomputable def ledoitWolfShrink {k : Nat}
     (α : Real) (S : CovMatrix k) : CovMatrix k :=
   shrinkMatrix α S (ledoitWolfTarget S)
 
-theorem ledoitWolfShrink_symm {k : Nat}
+theorem ledoitWolfShrink_isSymmetric {k : Nat}
     (α : Real) (S : CovMatrix k)
     (hS : Symmetric S) :
     Symmetric (ledoitWolfShrink α S) := by
-  apply shrinkMatrix_symm α S (ledoitWolfTarget S) hS
-  exact ledoitWolfTarget_symm S
+  apply shrinkMatrix_isSymmetric α S (ledoitWolfTarget S) hS
+  exact ledoitWolfTarget_isSymmetric S
 
-theorem ledoitWolfShrink_psd {k : Nat}
+theorem ledoitWolfShrink_isPsd {k : Nat}
     (α : Real) (S : CovMatrix k)
     (hα0 : 0 ≤ α) (hα1 : α ≤ 1)
     (hS : PositiveSemidefinite S)
     (hμ : 0 ≤ diagonalMean S) :
     PositiveSemidefinite (ledoitWolfShrink α S) := by
   unfold ledoitWolfShrink
-  apply shrinkMatrix_psd α S (ledoitWolfTarget S) hα0 hα1 hS
-  exact ledoitWolfTarget_psd S hμ
+  apply shrinkMatrix_preservesPsd α S (ledoitWolfTarget S) hα0 hα1 hS
+  exact ledoitWolfTarget_isPsd S hμ
+
+theorem ledoitWolfShrink_isPsd_of_psd {k : Nat}
+    (α : Real) (S : CovMatrix k)
+    (hk : 0 < k)
+    (hα0 : 0 ≤ α) (hα1 : α ≤ 1)
+    (hS : PositiveSemidefinite S) :
+    PositiveSemidefinite (ledoitWolfShrink α S) := by
+  exact ledoitWolfShrink_isPsd α S hα0 hα1 hS (diagonalMean_nonneg_of_psd hk S hS)
 
 theorem ledoitWolfShrink_zero {k : Nat}
     (S : CovMatrix k) :
@@ -142,18 +177,6 @@ theorem ledoitWolfShrink_one {k : Nat}
     ledoitWolfShrink 1 S = ledoitWolfTarget S := by
   funext i j
   simp [ledoitWolfShrink, shrinkMatrix]
-
-/-- Apply shrinkage to the covariance produced by a history of samples. -/
-noncomputable def fromListLedoitWolf {k : Nat}
-    (α : Real) (xs : List (Fin k -> Real)) : CovMatrix k :=
-  ledoitWolfShrink α (covarianceMatrix (fromList k xs))
-
-theorem fromListLedoitWolf_symm {k : Nat}
-    (α : Real) (xs : List (Fin k -> Real)) :
-    Symmetric (fromListLedoitWolf α xs) := by
-  unfold fromListLedoitWolf
-  apply ledoitWolfShrink_symm
-  exact fromList_covarianceMatrix_symm xs
 
 /-- Clamp any real coefficient into the valid shrinkage interval `[0, 1]`. -/
 def clip01 (α : Real) : Real :=
@@ -180,31 +203,97 @@ noncomputable def boundedLedoitWolfShrink {k : Nat}
     (α : Real) (S : CovMatrix k) : CovMatrix k :=
   ledoitWolfShrink (clip01 α) S
 
-theorem boundedLedoitWolfShrink_symm {k : Nat}
+theorem boundedLedoitWolfShrink_isSymmetric {k : Nat}
     (α : Real) (S : CovMatrix k)
     (hS : Symmetric S) :
     Symmetric (boundedLedoitWolfShrink α S) := by
   unfold boundedLedoitWolfShrink
-  exact ledoitWolfShrink_symm (clip01 α) S hS
+  exact ledoitWolfShrink_isSymmetric (clip01 α) S hS
 
-theorem boundedLedoitWolfShrink_psd {k : Nat}
+theorem boundedLedoitWolfShrink_isPsd {k : Nat}
     (α : Real) (S : CovMatrix k)
     (hS : PositiveSemidefinite S)
     (hμ : 0 ≤ diagonalMean S) :
     PositiveSemidefinite (boundedLedoitWolfShrink α S) := by
   unfold boundedLedoitWolfShrink
-  apply ledoitWolfShrink_psd (clip01 α) S (clip01_nonneg α) (clip01_le_one α) hS hμ
+  apply ledoitWolfShrink_isPsd (clip01 α) S (clip01_nonneg α) (clip01_le_one α) hS hμ
 
-/-- API-facing shrinkage estimate from a history of samples. -/
+theorem boundedLedoitWolfShrink_isPsd_of_psd {k : Nat}
+    (α : Real) (S : CovMatrix k)
+    (hk : 0 < k)
+    (hS : PositiveSemidefinite S) :
+    PositiveSemidefinite (boundedLedoitWolfShrink α S) := by
+  exact boundedLedoitWolfShrink_isPsd α S hS (diagonalMean_nonneg_of_psd hk S hS)
+
+/-!
+History-facing wrappers.
+
+These are the entry points most relevant to the Rust implementation:
+fit a covariance matrix from raw data, then shrink it with a coefficient that
+is clamped into the mathematically valid interval.
+-/
+
+/-- Apply exact Ledoit-Wolf shrinkage to the covariance produced by a history. -/
+noncomputable def fromListLedoitWolf {k : Nat}
+    (α : Real) (xs : History k) : CovMatrix k :=
+  ledoitWolfShrink α (covarianceMatrix (fromList k xs))
+
+theorem fromListLedoitWolf_isSymmetric {k : Nat}
+    (α : Real) (xs : History k) :
+    Symmetric (fromListLedoitWolf α xs) := by
+  unfold fromListLedoitWolf
+  apply ledoitWolfShrink_isSymmetric
+  exact fromList_covarianceMatrix_isSymmetric xs
+
+/-- Classical Ledoit-Wolf shrinkage written against the direct classical covariance. -/
+noncomputable def classicalLedoitWolf {k : Nat}
+    (α : Real) (xs : History k) : CovMatrix k :=
+  boundedLedoitWolfShrink α (classicalCovariance xs)
+
+/-- API-facing Ledoit-Wolf estimator built from the streaming covariance fit. -/
 noncomputable def fitLedoitWolf {k : Nat}
-    (α : Real) (xs : List (Fin k -> Real)) : CovMatrix k :=
+    (α : Real) (xs : History k) : CovMatrix k :=
   boundedLedoitWolfShrink α (fitCovariance k xs)
 
-theorem fitLedoitWolf_symm {k : Nat}
-    (α : Real) (xs : List (Fin k -> Real)) :
+theorem fitLedoitWolf_isSymmetric {k : Nat}
+    (α : Real) (xs : History k) :
     Symmetric (fitLedoitWolf α xs) := by
   unfold fitLedoitWolf
-  exact boundedLedoitWolfShrink_symm α _ (fitCovariance_symm xs)
+  exact boundedLedoitWolfShrink_isSymmetric α _ (fitCovariance_isSymmetric xs)
+
+theorem classicalLedoitWolf_isSymmetric {k : Nat}
+    (α : Real) (xs : History k) :
+    Symmetric (classicalLedoitWolf α xs) := by
+  unfold classicalLedoitWolf
+  exact boundedLedoitWolfShrink_isSymmetric α _ (classicalCovariance_isSymmetric xs)
+
+/--
+Main Ledoit-Wolf correctness theorem at the history level.
+
+The streaming covariance pipeline and the direct classical covariance pipeline
+produce the same shrunk estimator in the exact `Real` model.
+-/
+theorem fitLedoitWolf_eq_classicalLedoitWolf {k : Nat}
+    (α : Real) (xs : History k) :
+    fitLedoitWolf α xs = classicalLedoitWolf α xs := by
+  funext i j
+  simp [fitLedoitWolf, classicalLedoitWolf, fitCovariance_eq_classicalCovariance]
+
+theorem classicalLedoitWolf_isPsd_of_psd {k : Nat}
+    (α : Real) (xs : History k)
+    (hk : 0 < k)
+    (hS : PositiveSemidefinite (classicalCovariance xs)) :
+    PositiveSemidefinite (classicalLedoitWolf α xs) := by
+  unfold classicalLedoitWolf
+  exact boundedLedoitWolfShrink_isPsd_of_psd α _ hk hS
+
+theorem fitLedoitWolf_isPsd_of_psd {k : Nat}
+    (α : Real) (xs : History k)
+    (hk : 0 < k)
+    (hS : PositiveSemidefinite (fitCovariance k xs)) :
+    PositiveSemidefinite (fitLedoitWolf α xs) := by
+  unfold fitLedoitWolf
+  exact boundedLedoitWolfShrink_isPsd_of_psd α _ hk hS
 
 end LedoitWolf
 

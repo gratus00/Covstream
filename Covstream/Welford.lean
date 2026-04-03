@@ -1,26 +1,40 @@
 import Mathlib
 
 /-!
-`Covstream.Welford` contains the Real-valued online covariance specification.
+`Covstream.Welford` is the exact `Real`-valued specification of the streaming
+covariance estimator.
 
-It defines:
+Read this file in four stages:
 
-1. The running Welford state.
-2. One-step and history-based updates.
-3. Symmetry/count invariants.
-4. Covariance-matrix vocabulary used by the Ledoit-Wolf layer.
+1. `WelfordCov.empty` and `WelfordCov.observe`
+2. `observeMany` and `fromList`
+3. `covarianceMatrix`
+4. `fitCovariance_eq_classicalCovariance`
+
+That last theorem is the headline result of the file: the streaming Welford state
+computes the same covariance matrix as the classical batch formula.
 -/
 
 namespace Covstream
 
-/-- Running state for a `k`-dimensional online covariance estimator. -/
+/-- One exact observation in dimension `k`. -/
+abbrev Obs (k : Nat) := Fin k → Real
+
+/-- A finite history of observations. -/
+abbrev History (k : Nat) := List (Obs k)
+
+/-- A covariance matrix in coordinate representation. -/
+abbrev CovMatrix (k : Nat) := Fin k → Fin k → Real
+
+/-- Running Welford state for a `k`-dimensional covariance estimator. -/
 structure WelfordCov (k : Nat) where
   n : Nat
-  mean : Fin k -> Real
-  C : Fin k -> Fin k -> Real
+  mean : Obs k
+  C : CovMatrix k
 
-section Welford
+section CoreState
 
+/-- The zero-observation Welford state. -/
 def WelfordCov.empty (k : Nat) : WelfordCov k :=
   {
     n := 0
@@ -28,7 +42,13 @@ def WelfordCov.empty (k : Nat) : WelfordCov k :=
     C := fun _ _ => 0
   }
 
-noncomputable def WelfordCov.observe (est : WelfordCov k) (x : Fin k -> Real) : WelfordCov k :=
+/--
+One Welford update step.
+
+`mean` stores the running sample mean. `C` stores the unnormalized covariance
+numerator that will later be divided by `n - 1`.
+-/
+noncomputable def WelfordCov.observe (est : WelfordCov k) (x : Obs k) : WelfordCov k :=
   let n' := est.n + 1
   let nf : Real := n'
   let delta := fun i => x i - est.mean i
@@ -36,24 +56,25 @@ noncomputable def WelfordCov.observe (est : WelfordCov k) (x : Fin k -> Real) : 
   let C' := fun i j => est.C i j + delta i * (x j - mean' j)
   { n := n', mean := mean', C := C' }
 
-theorem observe_increments_n {k : Nat} (est : WelfordCov k) (x : Fin k → Real) :
+theorem observe_n_eq_succ {k : Nat} (est : WelfordCov k) (x : Obs k) :
     (WelfordCov.observe est x).n = est.n + 1 := by
   rfl
 
-theorem empty_has_zero_observations (k : Nat) :
+theorem empty_n_eq_zero (k : Nat) :
     (WelfordCov.empty k).n = 0 := by
   rfl
 
-theorem observe_twice_n {k : Nat} (est : WelfordCov k) (x y : Fin k → Real) :
+theorem observe_twice_n_eq_add_two {k : Nat}
+    (est : WelfordCov k) (x y : Obs k) :
     (WelfordCov.observe (WelfordCov.observe est x) y).n = est.n + 2 := by
   simp [WelfordCov.observe]
 
-theorem empty_C_symm (k : Nat) (i j : Fin k) :
+theorem empty_covNumerator_isSymmetric (k : Nat) (i j : Fin k) :
     (WelfordCov.empty k).C i j = (WelfordCov.empty k).C j i := by
   rfl
 
-theorem observe_C_symm {k : Nat} (est : WelfordCov k)
-    (x : Fin k -> Real)
+theorem observe_covNumerator_isSymmetric {k : Nat} (est : WelfordCov k)
+    (x : Obs k)
     (h : ∀ i j, est.C i j = est.C j i)
     (i j : Fin k) :
     (WelfordCov.observe est x).C i j = (WelfordCov.observe est x).C j i := by
@@ -67,21 +88,21 @@ theorem observe_C_symm {k : Nat} (est : WelfordCov k)
   field_simp [hnf]
   ring
 
-theorem empty_covariance_zero (k : Nat) (i j : Fin k) :
+theorem empty_covNumerator_eq_zero (k : Nat) (i j : Fin k) :
     (WelfordCov.empty k).C i j = 0 := by
   rfl
 
-end Welford
+end CoreState
 
-section Histories
+section HistoryReplay
 
-/-- Replay a whole history of observations through the online update. -/
-noncomputable def observeMany {k : Nat} : WelfordCov k -> List (Fin k -> Real) -> WelfordCov k
+/-- Replay a whole history of observations through the streaming update. -/
+noncomputable def observeMany {k : Nat} : WelfordCov k → History k → WelfordCov k
 | est, [] => est
 | est, x :: xs => observeMany (WelfordCov.observe est x) xs
 
-theorem observeMany_increments_n {k : Nat}
-    (est : WelfordCov k) (xs : List (Fin k -> Real)) :
+theorem observeMany_n_eq_add_length {k : Nat}
+    (est : WelfordCov k) (xs : History k) :
     (observeMany est xs).n = est.n + xs.length := by
   induction xs generalizing est with
   | nil =>
@@ -89,15 +110,16 @@ theorem observeMany_increments_n {k : Nat}
   | cons x xs ih =>
       rw [observeMany]
       rw [ih (WelfordCov.observe est x)]
-      rw [observe_increments_n]
+      rw [observe_n_eq_succ]
       simp [Nat.add_assoc, Nat.add_comm]
 
-noncomputable def fromList (k : Nat) (xs : List (Fin k -> Real)) : WelfordCov k :=
+/-- Fit the exact Welford state from a raw history, starting from the empty state. -/
+noncomputable def fromList (k : Nat) (xs : History k) : WelfordCov k :=
   observeMany (WelfordCov.empty k) xs
 
-theorem observeMany_C_symm {k : Nat}
+theorem observeMany_covNumerator_isSymmetric {k : Nat}
     (est : WelfordCov k)
-    (xs : List (Fin k -> Real))
+    (xs : History k)
     (h : ∀ i j, est.C i j = est.C j i)
     (i j : Fin k) :
     (observeMany est xs).C i j = (observeMany est xs).C j i := by
@@ -108,37 +130,40 @@ theorem observeMany_C_symm {k : Nat}
       rw [observeMany]
       apply ih
       intro a b
-      exact observe_C_symm est x h a b
+      exact observe_covNumerator_isSymmetric est x h a b
 
-theorem fromList_increments_n {k : Nat}
-    (xs : List (Fin k -> Real)) :
+theorem fromList_n_eq_length {k : Nat}
+    (xs : History k) :
     (fromList k xs).n = xs.length := by
   unfold fromList
-  simpa [empty_has_zero_observations] using observeMany_increments_n (WelfordCov.empty k) xs
+  simpa [empty_n_eq_zero] using observeMany_n_eq_add_length (WelfordCov.empty k) xs
 
-theorem fromList_C_symm {k : Nat}
-    (xs : List (Fin k -> Real))
+theorem fromList_covNumerator_isSymmetric {k : Nat}
+    (xs : History k)
     (i j : Fin k) :
     (fromList k xs).C i j = (fromList k xs).C j i := by
   unfold fromList
-  exact observeMany_C_symm (WelfordCov.empty k) xs (empty_C_symm k) i j
+  exact observeMany_covNumerator_isSymmetric (WelfordCov.empty k) xs
+    (empty_covNumerator_isSymmetric k) i j
 
-end Histories
+end HistoryReplay
 
-section CovarianceMatrices
+section MatrixVocabulary
 
-abbrev CovMatrix (k : Nat) := Fin k -> Fin k -> Real
-
+/-- Matrix symmetry in the coordinate representation. -/
 def Symmetric {k : Nat} (S : CovMatrix k) : Prop :=
   ∀ i j, S i j = S j i
 
-def quadraticForm {k : Nat} (S : CovMatrix k) (v : Fin k -> Real) : Real :=
+/-- Quadratic form associated to a coordinatewise matrix. -/
+def quadraticForm {k : Nat} (S : CovMatrix k) (v : Obs k) : Real :=
   ∑ i : Fin k, ∑ j : Fin k, v i * S i j * v j
 
+/-- Positive semidefiniteness stated through the quadratic form. -/
 def PositiveSemidefinite {k : Nat} (S : CovMatrix k) : Prop :=
-  ∀ v : Fin k -> Real, 0 ≤ quadraticForm S v
+  ∀ v : Obs k, 0 ≤ quadraticForm S v
 
-def basisVec {k : Nat} (i : Fin k) : Fin k -> Real :=
+/-- Standard basis vector used to read diagonal entries from a quadratic form. -/
+def basisVec {k : Nat} (i : Fin k) : Obs k :=
   fun j => if j = i then 1 else 0
 
 theorem quadraticForm_basisVec {k : Nat}
@@ -147,7 +172,7 @@ theorem quadraticForm_basisVec {k : Nat}
   classical
   simp [quadraticForm, basisVec]
 
-theorem psd_diag_nonneg {k : Nat}
+theorem psd_diagonal_nonneg {k : Nat}
     (S : CovMatrix k)
     (hS : PositiveSemidefinite S)
     (i : Fin k) :
@@ -158,7 +183,7 @@ theorem psd_diag_nonneg {k : Nat}
 noncomputable def covarianceMatrix {k : Nat} (est : WelfordCov k) : CovMatrix k :=
   fun i j => est.C i j / ((est.n - 1 : Nat) : Real)
 
-theorem covarianceMatrix_symm {k : Nat}
+theorem covarianceMatrix_isSymmetric {k : Nat}
     (est : WelfordCov k)
     (h : ∀ i j, est.C i j = est.C j i) :
     Symmetric (covarianceMatrix est) := by
@@ -166,22 +191,33 @@ theorem covarianceMatrix_symm {k : Nat}
   rw [covarianceMatrix, covarianceMatrix]
   rw [h i j]
 
-theorem fromList_covarianceMatrix_symm {k : Nat}
-    (xs : List (Fin k -> Real)) :
+theorem fromList_covarianceMatrix_isSymmetric {k : Nat}
+    (xs : History k) :
     Symmetric (covarianceMatrix (fromList k xs)) := by
   intro i j
-  exact covarianceMatrix_symm (fromList k xs) (fromList_C_symm xs) i j
+  exact covarianceMatrix_isSymmetric (fromList k xs) (fromList_covNumerator_isSymmetric xs) i j
+
+end MatrixVocabulary
+
+section ClassicalBatch
+
+/-!
+This section is the bridge from the streaming state machine to the direct batch
+formulas written from the raw observation history.
+
+The main result is `fitCovariance_eq_classicalCovariance`.
+-/
 
 /-- Coordinatewise sum of a raw observation history. -/
-def rawSum {k : Nat} (xs : List (Fin k -> Real)) : Fin k -> Real :=
+def rawSum {k : Nat} (xs : History k) : Obs k :=
   fun i => (xs.map (fun x => x i)).sum
 
 /-- Coordinatewise sum of outer-product entries over a raw observation history. -/
-def rawCrossSum {k : Nat} (xs : List (Fin k -> Real)) : CovMatrix k :=
+def rawCrossSum {k : Nat} (xs : History k) : CovMatrix k :=
   fun i j => (xs.map (fun x => x i * x j)).sum
 
 /-- Classical sample mean computed directly from the raw history. -/
-noncomputable def classicalMean {k : Nat} (xs : List (Fin k -> Real)) : Fin k -> Real :=
+noncomputable def classicalMean {k : Nat} (xs : History k) : Obs k :=
   fun i =>
     if xs = [] then 0
     else rawSum xs i / (xs.length : Real)
@@ -190,21 +226,23 @@ noncomputable def classicalMean {k : Nat} (xs : List (Fin k -> Real)) : Fin k ->
 Classical covariance numerator from the raw history.
 
 This is the usual centered sum written in the equivalent
-`Σ xxᵀ - n μ μᵀ` form, which is the right shape for proving
-correspondence with Welford's online accumulator.
+`Σ xxᵀ - n μ μᵀ` form, which matches the shape of Welford's streaming
+accumulator.
 -/
 noncomputable def classicalCovarianceNumerator {k : Nat}
-    (xs : List (Fin k -> Real)) : CovMatrix k :=
+    (xs : History k) : CovMatrix k :=
   fun i j => rawCrossSum xs i j - (xs.length : Real) * classicalMean xs i * classicalMean xs j
 
 /-- Classical unbiased sample covariance from a raw history. -/
 noncomputable def classicalCovariance {k : Nat}
-    (xs : List (Fin k -> Real)) : CovMatrix k :=
+    (xs : History k) : CovMatrix k :=
   fun i j => classicalCovarianceNumerator xs i j / ((xs.length - 1 : Nat) : Real)
 
-theorem observeMany_append {k : Nat}
+section Internal
+
+private theorem observeMany_append {k : Nat}
     (est : WelfordCov k)
-    (xs ys : List (Fin k -> Real)) :
+    (xs ys : History k) :
     observeMany est (xs ++ ys) = observeMany (observeMany est xs) ys := by
   induction xs generalizing est with
   | nil =>
@@ -212,31 +250,31 @@ theorem observeMany_append {k : Nat}
   | cons x xs ih =>
       simp [observeMany, ih]
 
-theorem fromList_append_singleton {k : Nat}
-    (xs : List (Fin k -> Real))
-    (x : Fin k -> Real) :
+private theorem fromList_append_singleton {k : Nat}
+    (xs : History k)
+    (x : Obs k) :
     fromList k (xs ++ [x]) = WelfordCov.observe (fromList k xs) x := by
   unfold fromList
   rw [observeMany_append]
   simp [observeMany]
 
-theorem rawSum_append_singleton {k : Nat}
-    (xs : List (Fin k -> Real))
-    (x : Fin k -> Real)
+private theorem rawSum_append_singleton {k : Nat}
+    (xs : History k)
+    (x : Obs k)
     (i : Fin k) :
     rawSum (xs ++ [x]) i = rawSum xs i + x i := by
   simp [rawSum, List.map_append, add_comm]
 
-theorem rawCrossSum_append_singleton {k : Nat}
-    (xs : List (Fin k -> Real))
-    (x : Fin k -> Real)
+private theorem rawCrossSum_append_singleton {k : Nat}
+    (xs : History k)
+    (x : Obs k)
     (i j : Fin k) :
     rawCrossSum (xs ++ [x]) i j = rawCrossSum xs i j + x i * x j := by
   simp [rawCrossSum, List.map_append, add_comm]
 
-theorem classicalMean_append_singleton {k : Nat}
-    (xs : List (Fin k -> Real))
-    (x : Fin k -> Real)
+private theorem classicalMean_append_singleton {k : Nat}
+    (xs : History k)
+    (x : Obs k)
     (i : Fin k) :
     classicalMean (xs ++ [x]) i
       = classicalMean xs i + (x i - classicalMean xs i) / ((xs.length + 1 : Nat) : Real) := by
@@ -253,20 +291,9 @@ theorem classicalMean_append_singleton {k : Nat}
     field_simp [hlen, hlen1]
     ring
 
-theorem fromList_mean_eq_classicalMean {k : Nat}
-    (xs : List (Fin k -> Real))
-    (i : Fin k) :
-    (fromList k xs).mean i = classicalMean xs i := by
-  induction xs using List.reverseRecOn with
-  | nil =>
-      simp [fromList, observeMany, classicalMean, WelfordCov.empty]
-  | append_singleton xs x ih =>
-      rw [fromList_append_singleton]
-      simp [WelfordCov.observe, fromList_increments_n, classicalMean_append_singleton, ih]
-
-theorem classicalCovarianceNumerator_append_singleton {k : Nat}
-    (xs : List (Fin k -> Real))
-    (x : Fin k -> Real)
+private theorem classicalCovarianceNumerator_append_singleton {k : Nat}
+    (xs : History k)
+    (x : Obs k)
     (i j : Fin k) :
     classicalCovarianceNumerator (xs ++ [x]) i j
       = classicalCovarianceNumerator xs i j
@@ -280,8 +307,28 @@ theorem classicalCovarianceNumerator_append_singleton {k : Nat}
   field_simp [hn1]
   ring
 
-theorem fromList_C_eq_classicalCovarianceNumerator {k : Nat}
-    (xs : List (Fin k -> Real))
+end Internal
+
+/-- Welford's running mean matches the direct batch mean from the same history. -/
+theorem fitMean_eq_classicalMean {k : Nat}
+    (xs : History k)
+    (i : Fin k) :
+    (fromList k xs).mean i = classicalMean xs i := by
+  induction xs using List.reverseRecOn with
+  | nil =>
+      simp [fromList, observeMany, classicalMean, WelfordCov.empty]
+  | append_singleton xs x ih =>
+      rw [fromList_append_singleton]
+      simp [WelfordCov.observe, fromList_n_eq_length, classicalMean_append_singleton, ih]
+
+/--
+Welford's stored covariance numerator matches the classical batch numerator.
+
+This is the key unnormalized statement that feeds into the final covariance
+equality theorem.
+-/
+theorem fitCovarianceNumerator_eq_classicalNumerator {k : Nat}
+    (xs : History k)
     (i j : Fin k) :
     (fromList k xs).C i j = classicalCovarianceNumerator xs i j := by
   induction xs using List.reverseRecOn with
@@ -290,41 +337,47 @@ theorem fromList_C_eq_classicalCovarianceNumerator {k : Nat}
         WelfordCov.empty]
   | append_singleton xs x ih =>
       rw [fromList_append_singleton, classicalCovarianceNumerator_append_singleton]
-      simp [WelfordCov.observe, fromList_increments_n, ih, fromList_mean_eq_classicalMean,
+      simp [WelfordCov.observe, fromList_n_eq_length, ih, fitMean_eq_classicalMean,
         classicalMean_append_singleton]
 
-theorem classicalCovarianceNumerator_symm {k : Nat}
-    (xs : List (Fin k -> Real)) :
+theorem classicalCovarianceNumerator_isSymmetric {k : Nat}
+    (xs : History k) :
     Symmetric (classicalCovarianceNumerator xs) := by
   intro i j
   simp [classicalCovarianceNumerator, rawCrossSum, mul_comm, mul_left_comm]
 
-theorem classicalCovariance_symm {k : Nat}
-    (xs : List (Fin k -> Real)) :
+theorem classicalCovariance_isSymmetric {k : Nat}
+    (xs : History k) :
     Symmetric (classicalCovariance xs) := by
   intro i j
   unfold classicalCovariance
-  rw [classicalCovarianceNumerator_symm xs i j]
+  rw [classicalCovarianceNumerator_isSymmetric xs i j]
 
 /-- API-facing name for the fitted Welford state from a history. -/
-noncomputable def fitWelford (k : Nat) (xs : List (Fin k -> Real)) : WelfordCov k :=
+noncomputable def fitWelford (k : Nat) (xs : History k) : WelfordCov k :=
   fromList k xs
 
 /-- API-facing name for the fitted covariance matrix from a history. -/
-noncomputable def fitCovariance (k : Nat) (xs : List (Fin k -> Real)) : CovMatrix k :=
+noncomputable def fitCovariance (k : Nat) (xs : History k) : CovMatrix k :=
   covarianceMatrix (fromList k xs)
 
-theorem fitCovariance_symm {k : Nat} (xs : List (Fin k -> Real)) :
+theorem fitCovariance_isSymmetric {k : Nat} (xs : History k) :
     Symmetric (fitCovariance k xs) := by
-  exact fromList_covarianceMatrix_symm xs
+  exact fromList_covarianceMatrix_isSymmetric xs
 
+/--
+Main Welford correctness theorem.
+
+The covariance returned by the streaming state matches the direct classical batch
+covariance computed from the same observation history.
+-/
 theorem fitCovariance_eq_classicalCovariance {k : Nat}
-    (xs : List (Fin k -> Real)) :
+    (xs : History k) :
     fitCovariance k xs = classicalCovariance xs := by
   funext i j
-  simp [fitCovariance, covarianceMatrix, classicalCovariance, fromList_C_eq_classicalCovarianceNumerator,
-    fromList_increments_n]
+  simp [fitCovariance, covarianceMatrix, classicalCovariance,
+    fitCovarianceNumerator_eq_classicalNumerator, fromList_n_eq_length]
 
-end CovarianceMatrices
+end ClassicalBatch
 
 end Covstream
