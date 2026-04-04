@@ -1,0 +1,17 @@
+[package]
+name = "covstream"
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+description = "High-performance streaming covariance and Ledoit-Wolf shrinkage"
+repository = ""
+
+[lib]
+name = "covstream"
+path = "src/lib.rs"
+
+[features]
+default = []
+
+[dev-dependencies]
+

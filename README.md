@@ -46,7 +46,7 @@ If you are reviewing the project quickly, read these in order:
 
 ## Main Theorems
 
-The four most important statements are:
+The most important Lean results are:
 
 1. `fitCovariance_eq_classicalCovariance`
    In `Covstream.Welford`, the streaming Welford covariance equals the direct
@@ -60,6 +60,15 @@ The four most important statements are:
 4. `oracleLedoitWolfCoeff_minimizes_shrinkageLoss_on_unitInterval`
    In `Covstream.ShrinkageOptimization`, the oracle Ledoit-Wolf coefficient is
    optimal for the scaled-identity target under Frobenius loss.
+5. `covarianceBuffer?_eq_exact`
+   In `Covstream.Contract`, successful checked covariance extraction returns the
+   exact covariance object encoded in the requested layout.
+6. `encodeMatrix_length`
+   In `Covstream.Contract`, every encoded matrix buffer has the exact length
+   implied by its layout.
+7. `boundedLedoitWolfShrink_entrywiseApprox`
+   In `Covstream.ErrorBounds`, clipped shrinkage is stable under entrywise
+   perturbations of the input covariance matrix.
 
 ## Module Layout
 
@@ -99,9 +108,26 @@ In the exact `Real` model, the code proves:
   interval `[0,1]`
 - the runtime-facing contract makes dimension checks, sample-count checks, and
   matrix layout choices explicit
-- perturbation lemmas bound how covariance and shrinkage outputs move under
-  entrywise input error
-- the checked API admits small concrete examples with exact buffer outputs
+- successful checked extraction returns exact mathematically specified outputs
+- encoded output buffers have theorem-backed sizes for both supported layouts
+- perturbation lemmas bound how target formation and shrinkage outputs move
+  under entrywise input error
+- the checked API admits small concrete examples of initialization, rejection,
+  and successful extraction
+
+## What This Does Not Yet Prove
+
+This repository does not yet prove:
+
+- that a Rust `f64` implementation exactly matches the Lean `Real` model
+- accumulated floating-point rounding error bounds for the implementation
+- an empirical data-only Ledoit-Wolf coefficient suitable for production use
+
+The current Lean development is best understood as:
+
+- an exact mathematical specification
+- a runtime API contract
+- a first perturbation layer that future floating-point analysis can build on
 
 ## Useful Commands
 
