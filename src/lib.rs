@@ -9,9 +9,11 @@
 
 
 mod error;
+mod layout;
 
 
-pub use crate::error::CovstreamError;
+pub use error::CovstreamError;
+pub use layout::MatrixLayout;
 
 
 
