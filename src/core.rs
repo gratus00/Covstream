@@ -84,6 +84,30 @@ impl CovstreamCore{
         self.sample_count=next_count;
         Ok(()) 
     }
+
+    pub fn covariance_row_major(&self)->Result<Vec<f64>, CovstreamError>{
+        if self.sample_count < 2 {
+            return Err(CovstreamError::InsufficientSamples { 
+                actual: (self.sample_count as usize), 
+            });
+        }
+
+        let dimension = self.dimension;
+        let denominator = (self.sample_count - 1) as f64;
+        let mut out = vec![0.0; dimension * dimension];
+
+        for row in 0..dimension{
+            for col in 0..dimension{
+                let packed = if row <= col {
+                    packed_index(dimension, row, col)
+                } else {
+                    packed_index(dimension, col, row)
+                };
+                out[row * dimension + col] = self.cov_numerator[packed]/denominator;
+            }
+        }
+        Ok(out)
+    }
 }
 
 impl CovstreamState {
@@ -265,6 +289,57 @@ mod tests {
 
         assert_eq!(state.cov_numerator(), &[2.0, 2.0, 2.0]);
     }
+
+    #[test]
+    fn covariance_row_major_rejects_insufficient_samples() {
+        let result = CovstreamCore::new(2);
+
+        let state = match result {
+            Ok(state) => state,
+            Err(err) => panic!("expected success, got error: {:?}", err),
+        };
+
+        let covariance = state.covariance_row_major();
+
+        match covariance {
+            Err(CovstreamError::InsufficientSamples { actual }) => {
+                assert_eq!(actual, 0);
+            }
+            Err(other) => panic!("unexpected error: {:?}", other),
+            Ok(_) => panic!("expected InsufficientSamples error, got success"),
+        }
+    }
+
+    #[test]
+    fn covariance_row_major_returns_expected_2x2_matrix() {
+        let result = CovstreamCore::new(2);
+
+        let mut state = match result {
+            Ok(state) => state,
+            Err(err) => panic!("expected success, got error: {:?}", err),
+        };
+
+        match state.observe(&[1.0, 2.0]) {
+            Ok(()) => {}
+            Err(err) => panic!("expected success, got error: {:?}", err),
+        }
+
+        match state.observe(&[3.0, 4.0]) {
+            Ok(()) => {}
+            Err(err) => panic!("expected success, got error: {:?}", err),
+        }
+
+        let covariance = state.covariance_row_major();
+
+        match covariance {
+            Ok(matrix) => {
+                assert_eq!(matrix, vec![2.0, 2.0, 2.0, 2.0]);
+            }
+            Err(err) => panic!("expected success, got error: {:?}", err),
+        }
+    }
+
+    
 
 }
 
