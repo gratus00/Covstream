@@ -108,6 +108,23 @@ impl CovstreamCore{
         }
         Ok(out)
     }
+
+    pub fn covariance_upper_triangle_packed(&self)-> Result<Vec<f64>, CovstreamError>{
+        if self.sample_count < 2{
+            return Err(CovstreamError::InsufficientSamples { 
+                actual: self.sample_count as usize,
+            });
+        }
+
+        let denominator = (self.sample_count - 1) as f64;
+        let mut out = vec![0.0; self.cov_numerator.len()];
+
+        for i in 0..self.cov_numerator.len(){
+            out[i]=self.cov_numerator[i]/denominator;
+        }
+
+        Ok(out)
+    }
 }
 
 impl CovstreamState {
@@ -128,6 +145,21 @@ impl CovstreamState {
 
     pub fn sample_count(&self) -> u64 {
         self.core.sample_count()
+    }
+
+    pub fn covariance_row_major(&self)->Result<Vec<f64>, CovstreamError>{
+        self.core.covariance_row_major()
+    }
+
+    pub fn covarience_buffer(&self)->Result<Vec<f64>, CovstreamError>{
+        match self.layout{
+            MatrixLayout::RowMajor => self.core.covariance_row_major(),
+            MatrixLayout::UpperTrianglePacked => self.core.covariance_upper_triangle_packed(),
+        }
+    }
+
+    pub fn observe(&mut self, sample: &[f64]) -> Result<(), CovstreamError> {
+        self.core.observe(sample)
     }
 }
 
@@ -339,7 +371,90 @@ mod tests {
         }
     }
 
-    
+    #[test]
+    fn covariance_upper_triangle_packed_returns_expected_2x2_output() {
+        let result = CovstreamCore::new(2);
 
+        let mut state = match result {
+            Ok(state) => state,
+            Err(err) => panic!("expected success, got error: {:?}", err),
+        };
+
+        match state.observe(&[1.0, 2.0]) {
+            Ok(()) => {}
+            Err(err) => panic!("expected success, got error: {:?}", err),
+        }
+
+        match state.observe(&[3.0, 4.0]) {
+            Ok(()) => {}
+            Err(err) => panic!("expected success, got error: {:?}", err),
+        }
+
+        let covariance = state.covariance_upper_triangle_packed();
+
+        match covariance {
+            Ok(matrix) => {
+                assert_eq!(matrix, vec![2.0, 2.0, 2.0]);
+            }
+            Err(err) => panic!("expected success, got error: {:?}", err),
+        }
+    }
+
+    #[test]
+    fn state_covariance_buffer_uses_row_major_layout() {
+        let result = CovstreamState::new(2, MatrixLayout::RowMajor);
+
+        let mut state = match result {
+            Ok(state) => state,
+            Err(err) => panic!("expected success, got error: {:?}", err),
+        };
+
+        match state.observe(&[1.0, 2.0]) {
+            Ok(()) => {}
+            Err(err) => panic!("expected success, got error: {:?}", err),
+        }
+
+        match state.observe(&[3.0, 4.0]) {
+            Ok(()) => {}
+            Err(err) => panic!("expected success, got error: {:?}", err),
+        }
+
+        let covariance = state.covarience_buffer();
+
+        match covariance {
+            Ok(matrix) => {
+                assert_eq!(matrix, vec![2.0, 2.0, 2.0, 2.0]);
+            }
+            Err(err) => panic!("expected success, got error: {:?}", err),
+        }
+    }
+
+    #[test]
+    fn state_covariance_buffer_uses_packed_layout() {
+        let result = CovstreamState::new(2, MatrixLayout::UpperTrianglePacked);
+
+        let mut state = match result {
+            Ok(state) => state,
+            Err(err) => panic!("expected success, got error: {:?}", err),
+        };
+
+        match state.observe(&[1.0, 2.0]) {
+            Ok(()) => {}
+            Err(err) => panic!("expected success, got error: {:?}", err),
+        }
+
+        match state.observe(&[3.0, 4.0]) {
+            Ok(()) => {}
+            Err(err) => panic!("expected success, got error: {:?}", err),
+        }
+
+        let covariance = state.covarience_buffer();
+
+        match covariance {
+            Ok(matrix) => {
+                assert_eq!(matrix, vec![2.0, 2.0, 2.0]);
+            }
+            Err(err) => panic!("expected success, got error: {:?}", err),
+        }
+    }
 }
-
