@@ -1,4 +1,5 @@
-use crate::{CovstreamError, MatrixLayout};
+use crate::{CovstreamError, MatrixLayout, ShrinkageMode};
+use crate::shrinkage::shrink_with_mode_row_major;
 
 #[derive(Debug, Clone)]
 pub struct CovstreamCore{
@@ -125,6 +126,11 @@ impl CovstreamCore{
 
         Ok(out)
     }
+
+    pub fn ledoit_wolf_row_major(&self, mode:ShrinkageMode) -> Result<Vec<f64>, CovstreamError>{
+        let covariance = self.covariance_row_major()?;
+        Ok(shrink_with_mode_row_major(&covariance, self.dimension, mode))
+    }
 }
 
 impl CovstreamState {
@@ -151,7 +157,7 @@ impl CovstreamState {
         self.core.covariance_row_major()
     }
 
-    pub fn covarience_buffer(&self)->Result<Vec<f64>, CovstreamError>{
+    pub fn covariance_buffer(&self)->Result<Vec<f64>, CovstreamError>{
         match self.layout{
             MatrixLayout::RowMajor => self.core.covariance_row_major(),
             MatrixLayout::UpperTrianglePacked => self.core.covariance_upper_triangle_packed(),
@@ -161,6 +167,20 @@ impl CovstreamState {
     pub fn observe(&mut self, sample: &[f64]) -> Result<(), CovstreamError> {
         self.core.observe(sample)
     }
+
+    pub fn ledoit_wolf_row_major(&self, mode: ShrinkageMode)->Result<Vec<f64>, CovstreamError>{
+        self.core.ledoit_wolf_row_major(mode)
+    }
+
+    pub fn ledoit_wolf_buffer(&self, mode: ShrinkageMode) -> Result<Vec<f64>, CovstreamError> {
+        match self.layout {
+            MatrixLayout::RowMajor => self.core.ledoit_wolf_row_major(mode),
+            MatrixLayout::UpperTrianglePacked => {
+                let row_major = self.core.ledoit_wolf_row_major(mode)?;
+                Ok(row_major_to_upper_triangle_packed(&row_major, self.dimension()))
+            }
+        }
+    } 
 }
 
 
@@ -173,6 +193,18 @@ fn packed_index(dimension: usize, row: usize, col: usize) -> usize {
     debug_assert!(col<dimension);
 
     row * dimension - (row * row.saturating_sub(1))/2 + (col - row)
+}
+
+fn row_major_to_upper_triangle_packed(matrix: &[f64], dimension: usize) -> Vec<f64> {
+    let mut out = vec![0.0; packed_len(dimension)];
+
+    for row in 0..dimension { 
+        for col in row..dimension {
+            let packed = packed_index(dimension, row, col);
+            out[packed] = matrix[row*dimension + col];
+        }
+    }
+    out
 }
 
 #[cfg(test)]
@@ -419,7 +451,7 @@ mod tests {
             Err(err) => panic!("expected success, got error: {:?}", err),
         }
 
-        let covariance = state.covarience_buffer();
+        let covariance = state.covariance_buffer();
 
         match covariance {
             Ok(matrix) => {
@@ -448,7 +480,7 @@ mod tests {
             Err(err) => panic!("expected success, got error: {:?}", err),
         }
 
-        let covariance = state.covarience_buffer();
+        let covariance = state.covariance_buffer();
 
         match covariance {
             Ok(matrix) => {
@@ -457,4 +489,153 @@ mod tests {
             Err(err) => panic!("expected success, got error: {:?}", err),
         }
     }
+    #[test]
+    fn ledoit_wolf_row_major_with_zero_alpha_matches_covariance() {
+        let result = CovstreamCore::new(2);
+
+        let mut state = match result {
+            Ok(state) => state,
+            Err(err) => panic!("expected success, got error: {:?}", err),
+        };
+
+        match state.observe(&[1.0, 2.0]) {
+            Ok(()) => {}
+            Err(err) => panic!("expected success, got error: {:?}", err),
+        }
+
+        match state.observe(&[3.0, 4.0]) {
+            Ok(()) => {}
+            Err(err) => panic!("expected success, got error: {:?}", err),
+        }
+
+        let covariance = state.covariance_row_major();
+        let shrunk = state.ledoit_wolf_row_major(ShrinkageMode::FixedAlpha(0.0));
+
+        match (covariance, shrunk) {
+            (Ok(covariance_matrix), Ok(shrunk_matrix)) => {
+                assert_eq!(shrunk_matrix, covariance_matrix);
+            }
+            (Err(err), _) => panic!("expected covariance success, got error: {:?}", err),
+            (_, Err(err)) => panic!("expected shrinkage success, got error: {:?}", err),
+        }
+    }
+
+    #[test]
+    fn ledoit_wolf_row_major_with_one_alpha_matches_target() {
+        let result = CovstreamCore::new(2);
+
+        let mut state = match result {
+            Ok(state) => state,
+            Err(err) => panic!("expected success, got error: {:?}", err),
+        };
+
+        match state.observe(&[1.0, 2.0]) {
+            Ok(()) => {}
+            Err(err) => panic!("expected success, got error: {:?}", err),
+        }
+
+        match state.observe(&[3.0, 4.0]) {
+            Ok(()) => {}
+            Err(err) => panic!("expected success, got error: {:?}", err),
+        }
+
+        let shrunk = state.ledoit_wolf_row_major(ShrinkageMode::FixedAlpha(1.0));
+
+        match shrunk {
+            Ok(matrix) => {
+                assert_eq!(matrix, vec![2.0, 0.0, 0.0, 2.0]);
+            }
+            Err(err) => panic!("expected shrinkage success, got error: {:?}", err),
+        }
+    }
+
+    #[test]
+    fn state_ledoit_wolf_row_major_with_zero_alpha_matches_covariance() {
+        let result = CovstreamState::new(2, MatrixLayout::RowMajor);
+
+        let mut state = match result {
+            Ok(state) => state,
+            Err(err) => panic!("expected success, got error: {:?}", err),
+        };
+
+        match state.observe(&[1.0, 2.0]) {
+            Ok(()) => {}
+            Err(err) => panic!("expected success, got error: {:?}", err),
+        }
+
+        match state.observe(&[3.0, 4.0]) {
+            Ok(()) => {}
+            Err(err) => panic!("expected success, got error: {:?}", err),
+        }
+
+        let covariance = state.covariance_row_major();
+        let shrunk = state.ledoit_wolf_row_major(ShrinkageMode::FixedAlpha(0.0));
+
+        match (covariance, shrunk) {
+            (Ok(covariance_matrix), Ok(shrunk_matrix)) => {
+                assert_eq!(shrunk_matrix, covariance_matrix);
+            }
+            (Err(err), _) => panic!("expected covariance success, got error: {:?}", err),
+            (_, Err(err)) => panic!("expected shrinkage success, got error: {:?}", err),
+        }
+    }
+
+    #[test]
+    fn state_ledoit_wolf_buffer_uses_row_major_layout() {
+        let result = CovstreamState::new(2, MatrixLayout::RowMajor);
+
+        let mut state = match result {
+            Ok(state) => state,
+            Err(err) => panic!("expected success, got error: {:?}", err),
+        };
+
+        match state.observe(&[1.0, 2.0]) {
+            Ok(()) => {}
+            Err(err) => panic!("expected success, got error: {:?}", err),
+        }
+
+        match state.observe(&[3.0, 4.0]) {
+            Ok(()) => {}
+            Err(err) => panic!("expected success, got error: {:?}", err),
+        }
+
+        let shrunk = state.ledoit_wolf_buffer(ShrinkageMode::FixedAlpha(1.0));
+
+        match shrunk {
+            Ok(matrix) => {
+                assert_eq!(matrix, vec![2.0, 0.0, 0.0, 2.0]);
+            }
+            Err(err) => panic!("expected shrinkage success, got error: {:?}", err),
+        }
+    }
+
+    #[test]
+    fn state_ledoit_wolf_buffer_uses_packed_layout() {
+        let result = CovstreamState::new(2, MatrixLayout::UpperTrianglePacked);
+
+        let mut state = match result {
+            Ok(state) => state,
+            Err(err) => panic!("expected success, got error: {:?}", err),
+        };
+
+        match state.observe(&[1.0, 2.0]) {
+            Ok(()) => {}
+            Err(err) => panic!("expected success, got error: {:?}", err),
+        }
+
+        match state.observe(&[3.0, 4.0]) {
+            Ok(()) => {}
+            Err(err) => panic!("expected success, got error: {:?}", err),
+        }
+
+        let shrunk = state.ledoit_wolf_buffer(ShrinkageMode::FixedAlpha(1.0));
+
+        match shrunk {
+            Ok(matrix) => {
+                assert_eq!(matrix, vec![2.0, 0.0, 2.0]);
+            }
+            Err(err) => panic!("expected shrinkage success, got error: {:?}", err),
+        }
+    }
+
 }
