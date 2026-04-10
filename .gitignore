@@ -1,2 +1,3 @@
-/.lake
-/target/*
+/.lake/
+/target/
+.DS_Store
