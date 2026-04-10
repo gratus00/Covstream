@@ -14,4 +14,8 @@ path = "src/lib.rs"
 default = []
 
 [dev-dependencies]
+criterion = "0.5"
 
+[[bench]]
+name = "core_bench"
+harness = false
