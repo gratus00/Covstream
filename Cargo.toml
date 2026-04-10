@@ -3,8 +3,13 @@ name = "covstream"
 version = "0.1.0"
 edition = "2021"
 license = "MIT"
-description = "High-performance streaming covariance and Ledoit-Wolf shrinkage"
-repository = ""
+description = "Lean-backed fixed-dimension streaming covariance and Ledoit-Wolf shrinkage"
+readme = "README.md"
+repository = "https://github.com/gratus00/Covstream"
+homepage = "https://github.com/gratus00/Covstream"
+documentation = "https://docs.rs/covstream"
+keywords = ["covariance", "streaming", "finance", "quant", "statistics"]
+categories = ["science", "mathematics", "algorithms"]
 
 [lib]
 name = "covstream"

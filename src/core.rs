@@ -1,290 +1,397 @@
-use crate::{CovstreamError, MatrixLayout, ShrinkageMode};
-use crate::shrinkage::shrink_with_mode_row_major;
+use crate::packing::{packed_index, packed_len};
+use crate::shrinkage::shrink_entry;
+use crate::{CovstreamError, ShrinkageMode};
 
+/// Low-level fixed-dimension streaming covariance engine.
+///
+/// This type owns the running Welford state:
+///
+/// - sample count
+/// - running mean vector
+/// - packed upper-triangle covariance numerator
+///
+/// Use [`CovstreamCore`] when you want explicit control over ingest and output
+/// layout. If you want a simpler API that remembers a preferred layout, use
+/// [`crate::CovstreamState`] instead.
 #[derive(Debug, Clone)]
-pub struct CovstreamCore{
+pub struct CovstreamCore {
     dimension: usize,
-    sample_count:u64,
-    mean:Vec<f64>,
-    cov_numerator:Vec<f64>,
-    scratch_delta:Vec<f64>,
+    sample_count: u64,
+    mean: Vec<f64>,
+    cov_numerator: Vec<f64>,
+    scratch_delta: Vec<f64>,
+    scratch_residual: Vec<f64>,
 }
 
-#[derive(Debug, Clone)]
-pub struct CovstreamState{
-    layout: MatrixLayout,
-    core: CovstreamCore,
-}
-
-impl CovstreamCore{
-    pub fn new(dimension:usize)-> Result<Self, CovstreamError>{
-        if dimension==0{
+impl CovstreamCore {
+    /// Creates a new zeroed streaming state for a fixed dimension.
+    ///
+    /// Returns [`CovstreamError::ZeroDimension`] when `dimension == 0`.
+    pub fn new(dimension: usize) -> Result<Self, CovstreamError> {
+        if dimension == 0 {
             return Err(CovstreamError::ZeroDimension);
         }
 
         Ok(Self {
             dimension,
-            sample_count:0,
+            sample_count: 0,
             mean: vec![0.0; dimension],
             cov_numerator: vec![0.0; packed_len(dimension)],
             scratch_delta: vec![0.0; dimension],
+            scratch_residual: vec![0.0; dimension],
         })
     }
 
+    /// Returns the fixed dimension of every sample accepted by this state.
     pub fn dimension(&self) -> usize {
         self.dimension
     }
 
+    /// Returns the number of observed samples.
     pub fn sample_count(&self) -> u64 {
         self.sample_count
     }
 
+    /// Returns the current running mean vector.
+    ///
+    /// The slice length is always [`Self::dimension`].
     pub fn mean(&self) -> &[f64] {
         &self.mean
     }
 
+    /// Returns the packed upper-triangle covariance numerator.
+    ///
+    /// This is the internal Welford accumulator before division by `n - 1`.
     pub fn cov_numerator(&self) -> &[f64] {
         &self.cov_numerator
     }
 
-    pub fn check_sample(&self, sample:&[f64])->Result<(), CovstreamError>{
-        if sample.len()!= self.dimension{
+    /// Validates one sample for safe ingest.
+    ///
+    /// The sample must:
+    ///
+    /// - have length [`Self::dimension`]
+    /// - contain only finite values
+    pub fn check_sample(&self, sample: &[f64]) -> Result<(), CovstreamError> {
+        if sample.len() != self.dimension {
             return Err(CovstreamError::WrongDimension {
                 expected: self.dimension,
-                got: sample.len(), 
+                got: sample.len(),
             });
         }
 
-        if sample.iter().any(|x| !x.is_finite()){
+        if sample.iter().any(|x| !x.is_finite()) {
             return Err(CovstreamError::NonFiniteInput);
         }
 
         Ok(())
     }
 
-    pub fn observe(&mut self, sample: &[f64])->Result<(), CovstreamError>{
-        self.check_sample(sample)?;
-        let next_count = self.sample_count+1;
-        let nf = next_count as f64;
-
-        for(i, value) in sample.iter().copied().enumerate() {
-            self.scratch_delta[i]=value-self.mean[i];
-        }
-
-        for i in 0..self.dimension { 
-            self.mean[i]+=self.scratch_delta[i]/nf;
-        }
-
-        for i in 0..self.dimension {
-            for j in i..self.dimension{
-                let idx = packed_index(self.dimension, i, j);
-                self.cov_numerator[idx] += self.scratch_delta[i] * (sample[j] - self.mean[j]);
-            }
-        }
-
-        self.sample_count=next_count;
-        Ok(()) 
-    }
-
-    pub fn covariance_row_major_into(&self, out: &mut [f64]) -> Result<(), CovstreamError>{
-        if self.sample_count < 2 {
-            return Err(CovstreamError::InsufficientSamples { 
-                actual: (self.sample_count as usize), 
+    fn check_batch_row_major(&self, samples: &[f64]) -> Result<(), CovstreamError> {
+        if !samples.len().is_multiple_of(self.dimension) {
+            return Err(CovstreamError::MalformedBatchInput {
+                dimension: self.dimension,
+                len: samples.len(),
             });
         }
 
-        let expected = self.dimension * self.dimension;
-        if out.len() < expected { 
-            return Err(CovstreamError::OutputBufferTooSmall { 
+        if samples.iter().any(|x| !x.is_finite()) {
+            return Err(CovstreamError::NonFiniteInput);
+        }
+
+        Ok(())
+    }
+
+    #[inline]
+    fn observe_validated(&mut self, sample: &[f64]) {
+        let dimension = self.dimension;
+        let next_count = self.sample_count + 1;
+        let nf = next_count as f64;
+
+        for (i, value) in sample.iter().copied().enumerate() {
+            self.scratch_delta[i] = value - self.mean[i];
+        }
+
+        for i in 0..dimension {
+            self.mean[i] += self.scratch_delta[i] / nf;
+        }
+
+        for (i, value) in sample.iter().copied().enumerate().take(dimension) {
+            self.scratch_residual[i] = value - self.mean[i];
+        }
+
+        let mut packed = 0;
+
+        for row in 0..dimension {
+            let delta_row = self.scratch_delta[row];
+            for col in row..dimension {
+                self.cov_numerator[packed] += delta_row * self.scratch_residual[col];
+                packed += 1;
+            }
+        }
+
+        self.sample_count = next_count;
+    }
+
+    /// Ingests one sample through the safe checked path.
+    ///
+    /// Use this when the input may come from an external system and still needs
+    /// shape and finite-value validation.
+    pub fn observe(&mut self, sample: &[f64]) -> Result<(), CovstreamError> {
+        self.check_sample(sample)?;
+        self.observe_validated(sample);
+        Ok(())
+    }
+
+    /// Ingests a flat row-major batch of back-to-back samples through the safe
+    /// checked path.
+    ///
+    /// For a dimension `k`, the buffer must look like:
+    ///
+    /// `sample_0[0], ..., sample_0[k-1], sample_1[0], ..., sample_1[k-1], ...`
+    ///
+    /// The total slice length must be a multiple of [`Self::dimension`].
+    pub fn observe_batch_row_major(&mut self, samples: &[f64]) -> Result<(), CovstreamError> {
+        self.check_batch_row_major(samples)?;
+
+        for sample in samples.chunks_exact(self.dimension) {
+            self.observe_validated(sample);
+        }
+
+        Ok(())
+    }
+
+    /// Ingests one sample while trusting the caller that all values are finite.
+    ///
+    /// This method still enforces shape checks, but it skips `NaN` / `Inf`
+    /// validation. It is intended for internal high-throughput pipelines whose
+    /// upstream layer has already validated numerical values.
+    pub fn observe_trusted_finite(&mut self, sample: &[f64]) -> Result<(), CovstreamError> {
+        if sample.len() != self.dimension {
+            return Err(CovstreamError::WrongDimension {
+                expected: self.dimension,
+                got: sample.len(),
+            });
+        }
+
+        self.observe_validated(sample);
+        Ok(())
+    }
+
+    /// Ingests a flat row-major batch while trusting the caller that all values
+    /// are finite.
+    ///
+    /// This preserves batch-shape validation and skips the finite-value scan.
+    pub fn observe_batch_row_major_trusted_finite(
+        &mut self,
+        samples: &[f64],
+    ) -> Result<(), CovstreamError> {
+        if !samples.len().is_multiple_of(self.dimension) {
+            return Err(CovstreamError::MalformedBatchInput {
+                dimension: self.dimension,
+                len: samples.len(),
+            });
+        }
+
+        for sample in samples.chunks_exact(self.dimension) {
+            self.observe_validated(sample);
+        }
+
+        Ok(())
+    }
+
+    /// Resets the state to its initial zeroed form without reallocating buffers.
+    pub fn reset(&mut self) {
+        self.sample_count = 0;
+        self.mean.fill(0.0);
+        self.cov_numerator.fill(0.0);
+        self.scratch_delta.fill(0.0);
+        self.scratch_residual.fill(0.0);
+    }
+
+    fn covariance_denominator(&self) -> Result<f64, CovstreamError> {
+        if self.sample_count < 2 {
+            return Err(CovstreamError::InsufficientSamples {
+                actual: self.sample_count as usize,
+            });
+        }
+
+        Ok((self.sample_count - 1) as f64)
+    }
+
+    fn diagonal_mean_from_covariance(&self, denominator: f64) -> f64 {
+        let mut diagonal_sum = 0.0;
+
+        for i in 0..self.dimension {
+            let packed = packed_index(self.dimension, i, i);
+            diagonal_sum += self.cov_numerator[packed];
+        }
+
+        diagonal_sum / denominator / self.dimension as f64
+    }
+
+    /// Writes the sample covariance matrix into a caller-provided row-major
+    /// buffer.
+    ///
+    /// The output slice must have length at least `dimension * dimension`.
+    /// Returns [`CovstreamError::InsufficientSamples`] until at least two
+    /// samples have been observed.
+    pub fn covariance_row_major_into(&self, out: &mut [f64]) -> Result<(), CovstreamError> {
+        let dimension = self.dimension;
+        let expected = dimension * dimension;
+
+        if out.len() < expected {
+            return Err(CovstreamError::OutputBufferTooSmall {
                 expected,
                 got: out.len(),
             });
         }
 
-        let denominator = (self.sample_count - 1) as f64;
+        let denominator = self.covariance_denominator()?;
 
-        for row in 0..self.dimension {
-            for col in 0..self.dimension {
-                let packed = if row <= col {
-                    packed_index(self.dimension, row, col)
-                } else {
-                    packed_index(self.dimension, col, row)
-                };
+        for row in 0..dimension {
+            let row_offset = row * dimension;
 
-                out[row*self.dimension + col] = self.cov_numerator[packed] / denominator;
+            for col in row..dimension {
+                let packed = packed_index(dimension, row, col);
+                let value = self.cov_numerator[packed] / denominator;
+
+                out[row_offset + col] = value;
+
+                if row != col {
+                    out[col * dimension + row] = value;
+                }
             }
         }
 
         Ok(())
     }
 
-    pub fn covariance_row_major(&self)->Result<Vec<f64>, CovstreamError>{
+    /// Returns the sample covariance matrix in row-major layout.
+    pub fn covariance_row_major(&self) -> Result<Vec<f64>, CovstreamError> {
         let mut out = vec![0.0; self.dimension * self.dimension];
         self.covariance_row_major_into(&mut out)?;
         Ok(out)
     }
 
-    pub fn covariance_upper_triangle_packed_into(&self, out: &mut [f64]) -> Result<(), CovstreamError> {
-        if self.sample_count < 2{
-            return Err(CovstreamError::InsufficientSamples { 
-                actual: self.sample_count as usize,
-            });
-        }
-
+    /// Writes the sample covariance matrix into a packed upper-triangle buffer.
+    ///
+    /// The layout is `(0,0), (0,1), ..., (0,k-1), (1,1), (1,2), ...`.
+    pub fn covariance_upper_triangle_packed_into(
+        &self,
+        out: &mut [f64],
+    ) -> Result<(), CovstreamError> {
         let expected = self.cov_numerator.len();
+
         if out.len() < expected {
-            return Err(CovstreamError::OutputBufferTooSmall { 
-                expected, 
-                got: out.len(),
-            });
-        }
-
-        let denominator = (self.sample_count - 1) as f64;
-        for i in 0..self.cov_numerator.len(){
-            out[i] = self.cov_numerator[i] / denominator;
-        }
-
-        Ok(())
-    }
-
-    pub fn covariance_upper_triangle_packed(&self)-> Result<Vec<f64>, CovstreamError>{
-        let mut out = vec![0.0; self.cov_numerator.len()];
-        self.covariance_upper_triangle_packed_into(&mut out)?;
-        Ok(out)
-    }
-
-    pub fn ledoit_wolf_row_major_into(&self, mode:ShrinkageMode, out: &mut [f64]) -> Result<(), CovstreamError> {
-        let covariance = self.covariance_row_major()?;
-        let expected = self.dimension * self.dimension;
-
-        if out.len() < expected { 
-            return Err(CovstreamError::OutputBufferTooSmall { 
+            return Err(CovstreamError::OutputBufferTooSmall {
                 expected,
                 got: out.len(),
             });
         }
 
-        let shrunk = shrink_with_mode_row_major(&covariance, self.dimension, mode);
-        for i in 0..expected {
-            out[i] = shrunk[i];
+        let denominator = self.covariance_denominator()?;
+
+        for (dst, src) in out.iter_mut().zip(self.cov_numerator.iter()) {
+            *dst = *src / denominator;
         }
 
         Ok(())
     }
 
-    pub fn ledoit_wolf_row_major(&self, mode:ShrinkageMode) -> Result<Vec<f64>, CovstreamError>{
-        let mut out  = vec![0.0; self.dimension * self.dimension];
-        self.ledoit_wolf_row_major_into(mode, &mut out)?;
+    /// Returns the sample covariance matrix in packed upper-triangle layout.
+    pub fn covariance_upper_triangle_packed(&self) -> Result<Vec<f64>, CovstreamError> {
+        let mut out = vec![0.0; self.cov_numerator.len()];
+        self.covariance_upper_triangle_packed_into(&mut out)?;
         Ok(out)
     }
-}
 
-impl CovstreamState {
-    pub fn new(dimension: usize, layout: MatrixLayout) -> Result<Self, CovstreamError> {
-        Ok(Self {
-            layout,
-            core: CovstreamCore::new(dimension)?,
-        })
-    }
-
-    pub fn layout(&self) -> MatrixLayout {
-        self.layout
-    }
-
-    pub fn dimension(&self) -> usize {
-        self.core.dimension()
-    }
-
-    pub fn sample_count(&self) -> u64 {
-        self.core.sample_count()
-    }
-
-    pub fn covariance_row_major(&self)->Result<Vec<f64>, CovstreamError>{
-        self.core.covariance_row_major()
-    }
-
-    pub fn covariance_buffer_into(&self, out: &mut [f64]) -> Result<(), CovstreamError> {
-        match self.layout {
-            MatrixLayout::RowMajor => self.core.covariance_row_major_into(out),
-            MatrixLayout::UpperTrianglePacked => self.core.covariance_upper_triangle_packed_into(out),
-        }
-    }
-
-    pub fn covariance_buffer(&self)->Result<Vec<f64>, CovstreamError>{
-        match self.layout{
-            MatrixLayout::RowMajor => self.core.covariance_row_major(),
-            MatrixLayout::UpperTrianglePacked => self.core.covariance_upper_triangle_packed(),
-        }
-    }
-
-    pub fn observe(&mut self, sample: &[f64]) -> Result<(), CovstreamError> {
-        self.core.observe(sample)
-    }
-
-    pub fn ledoit_wolf_row_major(&self, mode: ShrinkageMode)->Result<Vec<f64>, CovstreamError>{
-        self.core.ledoit_wolf_row_major(mode)
-    }
-
-    pub fn ledoit_wolf_buffer_into(
+    /// Writes the shrunk covariance matrix into a caller-provided row-major
+    /// buffer.
+    ///
+    /// Shrinkage is applied toward `μI` using the selected [`ShrinkageMode`].
+    pub fn ledoit_wolf_row_major_into(
         &self,
         mode: ShrinkageMode,
         out: &mut [f64],
     ) -> Result<(), CovstreamError> {
-        match self.layout {
-            MatrixLayout::RowMajor => self.core.ledoit_wolf_row_major_into(mode, out),
-            MatrixLayout::UpperTrianglePacked => {
-                let expected = packed_len(self.dimension());
-                if out.len() < expected {
-                    return Err(CovstreamError::OutputBufferTooSmall {
-                        expected,
-                        got: out.len(),
-                    });
-                }
+        let dimension = self.dimension;
+        let expected = dimension * dimension;
 
-                let row_major = self.core.ledoit_wolf_row_major(mode)?;
-                for row in 0..self.dimension() {
-                    for col in row..self.dimension() {
-                        let packed = packed_index(self.dimension(), row, col);
-                        out[packed] = row_major[row * self.dimension() + col];
-                    }
-                }
+        if out.len() < expected {
+            return Err(CovstreamError::OutputBufferTooSmall {
+                expected,
+                got: out.len(),
+            });
+        }
 
-                Ok(())
+        let alpha = mode.alpha();
+        let denominator = self.covariance_denominator()?;
+        let mu = self.diagonal_mean_from_covariance(denominator);
+
+        for row in 0..dimension {
+            let row_offset = row * dimension;
+
+            for col in row..dimension {
+                let packed = packed_index(dimension, row, col);
+                let covariance_entry = self.cov_numerator[packed] / denominator;
+                let value = shrink_entry(covariance_entry, mu, row == col, alpha);
+
+                out[row_offset + col] = value;
+                if row != col {
+                    out[col * dimension + row] = value;
+                }
             }
         }
+
+        Ok(())
     }
 
-    pub fn ledoit_wolf_buffer(&self, mode: ShrinkageMode) -> Result<Vec<f64>, CovstreamError> {
-        match self.layout {
-            MatrixLayout::RowMajor => self.core.ledoit_wolf_row_major(mode),
-            MatrixLayout::UpperTrianglePacked => {
-                let row_major = self.core.ledoit_wolf_row_major(mode)?;
-                Ok(row_major_to_upper_triangle_packed(&row_major, self.dimension()))
+    /// Returns the shrunk covariance matrix in row-major layout.
+    pub fn ledoit_wolf_row_major(&self, mode: ShrinkageMode) -> Result<Vec<f64>, CovstreamError> {
+        let mut out = vec![0.0; self.dimension * self.dimension];
+        self.ledoit_wolf_row_major_into(mode, &mut out)?;
+        Ok(out)
+    }
+
+    /// Writes the shrunk covariance matrix into a packed upper-triangle buffer.
+    pub fn ledoit_wolf_upper_triangle_packed_into(
+        &self,
+        mode: ShrinkageMode,
+        out: &mut [f64],
+    ) -> Result<(), CovstreamError> {
+        let dimension = self.dimension;
+        let expected = packed_len(dimension);
+
+        if out.len() < expected {
+            return Err(CovstreamError::OutputBufferTooSmall {
+                expected,
+                got: out.len(),
+            });
+        }
+
+        let alpha = mode.alpha();
+        let denominator = self.covariance_denominator()?;
+        let mu = self.diagonal_mean_from_covariance(denominator);
+
+        for row in 0..dimension {
+            for col in row..dimension {
+                let packed = packed_index(dimension, row, col);
+                let covariance_entry = self.cov_numerator[packed] / denominator;
+                out[packed] = shrink_entry(covariance_entry, mu, row == col, alpha);
             }
         }
-    } 
-}
 
-
-fn packed_len(dimension: usize) -> usize {
-    dimension * (dimension + 1) / 2
-}
-
-fn packed_index(dimension: usize, row: usize, col: usize) -> usize {
-    debug_assert!(row<=col);
-    debug_assert!(col<dimension);
-
-    row * dimension - (row * row.saturating_sub(1))/2 + (col - row)
-}
-
-fn row_major_to_upper_triangle_packed(matrix: &[f64], dimension: usize) -> Vec<f64> {
-    let mut out = vec![0.0; packed_len(dimension)];
-
-    for row in 0..dimension { 
-        for col in row..dimension {
-            let packed = packed_index(dimension, row, col);
-            out[packed] = matrix[row*dimension + col];
-        }
+        Ok(())
     }
-    out
+
+    /// Returns the shrunk covariance matrix in packed upper-triangle layout.
+    pub fn ledoit_wolf_upper_triangle_packed(
+        &self,
+        mode: ShrinkageMode,
+    ) -> Result<Vec<f64>, CovstreamError> {
+        let mut out = vec![0.0; packed_len(self.dimension)];
+        self.ledoit_wolf_upper_triangle_packed_into(mode, &mut out)?;
+        Ok(out)
+    }
 }

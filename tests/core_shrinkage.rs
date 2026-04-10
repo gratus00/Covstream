@@ -1,3 +1,5 @@
+mod common;
+
 use covstream::{CovstreamCore, CovstreamState, MatrixLayout, ShrinkageMode};
 
 #[test]
@@ -174,5 +176,59 @@ fn end_to_end_streaming_covariance_and_shrinkage_example() {
         }
         (Err(err), _) => panic!("expected covariance success, got error: {:?}", err),
         (_, Err(err)) => panic!("expected shrinkage success, got error: {:?}", err),
+    }
+}
+
+#[test]
+fn ledoit_wolf_row_major_matches_decimal_example_with_tolerance() {
+    let result = CovstreamCore::new(4);
+
+    let mut state = match result {
+        Ok(state) => state,
+        Err(err) => panic!("expected success, got error: {:?}", err),
+    };
+
+    let samples = [
+        [0.0020, -0.0010, 0.0005, 0.0015],
+        [0.0010, -0.0005, 0.0007, 0.0010],
+        [-0.0008, 0.0004, -0.0003, -0.0006],
+        [0.0015, -0.0008, 0.0009, 0.0011],
+        [0.0007, -0.0002, 0.0004, 0.0006],
+        [-0.0012, 0.0009, -0.0004, -0.0007],
+    ];
+
+    for sample in samples {
+        match state.observe(&sample) {
+            Ok(()) => {}
+            Err(err) => panic!("expected success, got error: {:?}", err),
+        }
+    }
+
+    let shrunk = state.ledoit_wolf_row_major(ShrinkageMode::ClippedAlpha(0.20));
+
+    match shrunk {
+        Ok(matrix) => {
+            let expected = vec![
+                1.46275e-6,
+                -7.36e-7,
+                4.944000000000001e-7,
+                9.349333333333332e-7,
+                -7.36e-7,
+                5.902166666666668e-7,
+                -2.8320000000000005e-7,
+                -5.264000000000001e-7,
+                4.944000000000001e-7,
+                -2.8320000000000005e-7,
+                3.918166666666667e-7,
+                3.6319999999999997e-7,
+                9.349333333333332e-7,
+                -5.264000000000001e-7,
+                3.6319999999999997e-7,
+                8.475499999999999e-7,
+            ];
+
+            common::assert_slice_close(&matrix, &expected, 1e-15);
+        }
+        Err(err) => panic!("expected shrinkage success, got error: {:?}", err),
     }
 }
