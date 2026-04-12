@@ -3,8 +3,8 @@
 `Covstream` is a Lean-backed Rust library for fixed-dimension streaming
 covariance and Ledoit-Wolf shrinkage over `f64`.
 
-It is aimed at quant research, portfolio analytics, telemetry analytics, and
-other systems that need to keep a covariance estimate hot in memory as new
+It is aimed at portfolio analytics, telemetry analytics, numerical experiments,
+and other systems that need to keep a covariance estimate hot in memory as new
 aligned vectors arrive.
 
 Use it when you want to:
@@ -241,20 +241,22 @@ This stabilizes the matrix while preserving the streaming update path.
 `Covstream` ships with Criterion benchmarks in
 [benches/core_bench.rs](./benches/core_bench.rs).
 
-On a local MacBook Air benchmark run on **April 10, 2026**, representative
+On a local MacBook Air benchmark run on **April 11, 2026**, representative
 256-dimension medians were:
 
 Each figure is the median time for one full benchmarked call named in the
 label, not for one arithmetic primitive inside that call.
 
-- `observe/256`: about `17.4 µs`
-- `covariance_extract/packed_into/256`: about `11.0 µs`
-- `covariance_extract/row_major_into/256`: about `99.9 µs`
-- `shrinkage_extract/ledoit_wolf_packed_into/256`: about `32.5 µs`
-- `observe_batch/batch_call/d256_n256`: about `4.36 ms` total for 256 samples
-- `observe_batch_parallel/trusted/d256_n1024`: about `4.97 ms` total on the
-  same local machine, versus about `11.40 ms` for the comparable trusted serial
-  batch path
+For steady-state single-sample ingest, the more representative benchmark is the
+hot-state path rather than the one-shot `observe/256` setup benchmark:
+
+- `observe_hot/trusted/256`: about `11.4 µs`
+- `covariance_extract/packed_into/256`: about `12.7 µs`
+- `covariance_extract/row_major_into/256`: about `85.1 µs`
+- `shrinkage_extract/ledoit_wolf_packed_into/256`: about `15.5 µs`
+- `observe_batch/batch_call/d256_n256`: about `3.92 ms` total for 256 samples
+- `observe_batch_parallel/trusted_serial/d256_n1024`: about `21.6 ms`
+- `observe_batch_parallel/trusted_parallel/d256_n1024`: about `8.31 ms`
 
 The important usage patterns are:
 
