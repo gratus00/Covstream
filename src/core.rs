@@ -3,7 +3,9 @@ use crate::packing::packed_len;
 use crate::{CovstreamError, ShrinkageMode};
 use rayon::prelude::*;
 
-const PARALLEL_MIN_WORK: usize = 1 << 18;
+const PARALLEL_MIN_WORK: usize = 1 << 20;
+const TARGET_TASKS_PER_THREAD: usize = 2;
+const MIN_CHUNK_SAMPLES: usize = 32;
 
 /// Low-level fixed-dimension streaming covariance engine.
 ///
@@ -319,7 +321,10 @@ impl CovstreamCore {
             return Ok(());
         }
 
-        let target_tasks = (rayon::current_num_threads() * 4).min(sample_count);
+        let target_tasks = (rayon::current_num_threads() * TARGET_TASKS_PER_THREAD)
+        .min(sample_count.div_ceil(MIN_CHUNK_SAMPLES).max(1))
+        .min(sample_count);
+
         let chunk_samples = sample_count.div_ceil(target_tasks);
 
         let merged = samples

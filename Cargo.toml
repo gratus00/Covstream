@@ -10,7 +10,7 @@ homepage = "https://github.com/gratus00/Covstream"
 documentation = "https://docs.rs/covstream"
 keywords = ["covariance", "streaming", "finance", "quant", "statistics"]
 categories = ["science", "mathematics", "algorithms"]
-exclude = ["/.github/**", "/target/**", "/.lake/**"]
+exclude = ["/.github/**", "/target/**", "/.lake/**", "/.codex"]
 
 [lib]
 name = "covstream"

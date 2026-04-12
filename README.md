@@ -241,22 +241,33 @@ This stabilizes the matrix while preserving the streaming update path.
 `Covstream` ships with Criterion benchmarks in
 [benches/core_bench.rs](./benches/core_bench.rs).
 
-On a local **MacBook Air (Apple M2, 8 CPU cores, 16 GB RAM)** benchmark run on
-**April 11, 2026**, representative 256-dimension medians were:
-
-Each figure is the median time for one full benchmarked call named in the
+Each figure below is the median time for one full benchmarked call named in the
 label, not for one arithmetic primitive inside that call.
 
-For steady-state single-sample ingest, the more representative benchmark is the
-hot-state path rather than the one-shot `observe/256` setup benchmark:
+Representative 256-dimension medians from two local hosts:
 
-- `observe_hot/trusted/256`: about `11.4 µs`
-- `covariance_extract/packed_into/256`: about `12.7 µs`
-- `covariance_extract/row_major_into/256`: about `85.1 µs`
-- `shrinkage_extract/ledoit_wolf_packed_into/256`: about `15.5 µs`
-- `observe_batch/batch_call/d256_n256`: about `3.92 ms` total for 256 samples
-- `observe_batch_parallel/trusted_serial/d256_n1024`: about `21.6 ms`
-- `observe_batch_parallel/trusted_parallel/d256_n1024`: about `8.31 ms`
+- **MacBook Air (Apple M2, 8 CPU cores, 16 GB RAM)** on **April 11, 2026**
+- **Linux desktop (AMD Ryzen 5 5600, 6 cores / 12 threads, 32 GB RAM)** on
+  **April 12, 2026**
+
+| Benchmark | MacBook Air M2 | Linux desktop Ryzen 5 5600 |
+| --- | ---: | ---: |
+| `observe_hot/trusted/256` | `11.4 µs` | `8.25 µs` |
+| `covariance_extract/packed_into/256` | `12.7 µs` | `5.63 µs` |
+| `covariance_extract/row_major_into/256` | `85.1 µs` | `78.2 µs` |
+| `shrinkage_extract/ledoit_wolf_packed_into/256` | `15.5 µs` | `6.98 µs` |
+| `observe_batch/batch_call/d256_n256` | `3.92 ms` | `2.15 ms` |
+| `observe_batch_parallel/trusted_serial/d256_n1024` | `21.6 ms` | `8.41 ms` |
+| `observe_batch_parallel/trusted_parallel/d256_n1024` | `8.31 ms` | `1.82 ms` |
+
+The Linux desktop run also makes the batch-parallel crossover clearer:
+
+- `d32_n256`: essentially break-even, with parallel overhead offsetting the
+  extra worker utilization
+- `d32_n1024`: `trusted_serial` about `206 µs`, `trusted_parallel` about `60.4 µs`
+- `d128_n256`: `trusted_serial` about `545 µs`, `trusted_parallel` about `202 µs`
+- `d256_n1024`: `trusted_serial` about `8.41 ms`, `trusted_parallel` about `1.82 ms`
+- `d512_n1024`: `trusted_serial` about `34.0 ms`, `trusted_parallel` about `8.44 ms`
 
 The important usage patterns are:
 
@@ -270,6 +281,8 @@ Run benchmarks with:
 
 ```bash
 cargo bench
+cargo bench --bench core_bench -- observe_batch_parallel
+cargo bench --bench core_bench -- d256_n1024
 ```
 
 ## Roadmap
@@ -331,9 +344,14 @@ Lean:
 
 ```bash
 source ~/.elan/env
+lake exe cache get
 lake build
 lake env lean Covstream/Welford.lean
 lake env lean Covstream/LedoitWolf.lean
 lake env lean Covstream/ShrinkageOptimization.lean
 lake env lean Covstream/Contract.lean
 ```
+
+If a fresh machine reports missing `ProofWidgets` assets, `lake exe cache get`
+usually fixes it. If you hit an `incompatible header` error from stale `.olean`
+artifacts, run `lake clean` and build again.

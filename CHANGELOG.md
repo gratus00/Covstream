@@ -4,7 +4,10 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
-- No unreleased entries yet.
+- added a repo-root MIT `LICENSE` file
+- README benchmark notes now include representative Linux desktop medians
+- README now documents `lake exe cache get` and `lake clean` for fresh Lean setups
+- crate packaging excludes the local `.codex` workspace file
 
 ## [0.1.0] - 2026-04-10
 
