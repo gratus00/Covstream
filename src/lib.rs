@@ -1,3 +1,5 @@
+#![deny(unsafe_op_in_unsafe_fn)]
+
 //! `covstream` is a fixed-dimension streaming covariance library with Lean-backed
 //! specifications.
 //!
@@ -20,9 +22,18 @@
 //! For higher-throughput pipelines that already validate inputs upstream, the
 //! `trusted_finite` ingest methods skip finite-value checks while preserving
 //! shape checks.
+//!
+//! Security and safety notes:
+//!
+//! - The crate does not perform network I/O, file I/O, subprocess execution, or
+//!   environment-based configuration in its library API.
+//! - The checked ingest paths validate dimensions and reject non-finite values.
+//! - The only `unsafe` code is isolated to optional AArch64 SIMD leaf kernels in
+//!   `src/kernels.rs`.
 
 mod core;
 mod error;
+mod kernels;
 mod layout;
 mod packing;
 pub mod shrinkage;

@@ -1,3 +1,6 @@
+mod common;
+
+use common::assert_slice_close;
 use covstream::{CovstreamCore, CovstreamError, CovstreamState, MatrixLayout};
 
 #[test]
@@ -303,4 +306,130 @@ fn state_observe_batch_row_major_works() {
     }
 
     assert_eq!(state.sample_count(), 2);
+}
+
+#[test]
+fn merge_matches_repeated_observe_with_tolerance() {
+    let samples = [[1.0, 2.0], [3.0, 4.0], [5.0, 6.0], [7.0, 8.0]];
+
+    let mut left = CovstreamCore::new(2).expect("valid dimension");
+    left.observe(&samples[0]).expect("finite sample");
+    left.observe(&samples[1]).expect("finite sample");
+
+    let mut right = CovstreamCore::new(2).expect("valid dimension");
+    right.observe(&samples[2]).expect("finite sample");
+    right.observe(&samples[3]).expect("finite sample");
+
+    let mut merged = left.clone();
+    merged.merge(&right).expect("matching dimensions");
+
+    let mut serial = CovstreamCore::new(2).expect("valid dimension");
+    for sample in samples {
+        serial.observe(&sample).expect("finite sample");
+    }
+
+    assert_eq!(merged.sample_count(), serial.sample_count());
+    assert_slice_close(merged.mean(), serial.mean(), 1e-12);
+    assert_slice_close(merged.cov_numerator(), serial.cov_numerator(), 1e-10);
+}
+
+#[test]
+fn parallel_batch_matches_serial_batch_with_tolerance() {
+    let batch = [
+        1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0, 11.0, 12.0,
+    ];
+
+    let mut serial = CovstreamCore::new(2).expect("valid dimension");
+    serial
+        .observe_batch_row_major(&batch)
+        .expect("finite batch");
+
+    let mut parallel = CovstreamCore::new(2).expect("valid dimension");
+    parallel
+        .observe_batch_row_major_parallel(&batch)
+        .expect("finite batch");
+
+    assert_eq!(parallel.sample_count(), serial.sample_count());
+    assert_slice_close(parallel.mean(), serial.mean(), 1e-12);
+    assert_slice_close(parallel.cov_numerator(), serial.cov_numerator(), 1e-10);
+}
+
+#[test]
+fn merge_rejects_wrong_dimension() {
+    let mut left = CovstreamCore::new(2).expect("valid dimension");
+    let right = CovstreamCore::new(3).expect("valid dimension");
+
+    let result = left.merge(&right);
+
+    match result {
+        Err(CovstreamError::WrongDimension { expected, got }) => {
+            assert_eq!(expected, 2);
+            assert_eq!(got, 3);
+        }
+        Err(other) => panic!("unexpected error: {:?}", other),
+        Ok(()) => panic!("expected WrongDimension error, got success"),
+    }
+}
+
+#[test]
+fn merge_into_empty_state_copies_other_state() {
+    let mut source = CovstreamCore::new(2).expect("valid dimension");
+    source.observe(&[1.0, 2.0]).expect("finite sample");
+    source.observe(&[3.0, 6.0]).expect("finite sample");
+    source.observe(&[5.0, 10.0]).expect("finite sample");
+
+    let mut target = CovstreamCore::new(2).expect("valid dimension");
+    target.merge(&source).expect("matching dimensions");
+
+    assert_eq!(target.sample_count(), source.sample_count());
+    assert_slice_close(target.mean(), source.mean(), 1e-12);
+    assert_slice_close(target.cov_numerator(), source.cov_numerator(), 1e-12);
+}
+
+#[test]
+fn parallel_trusted_batch_matches_serial_trusted_batch_with_tolerance() {
+    let batch: Vec<f64> = (0..(64 * 32))
+        .map(|i| ((i % 32) as f64 + 1.0) * ((i / 32) as f64 + 1.0) * 0.001)
+        .collect();
+
+    let mut serial = CovstreamCore::new(32).expect("valid dimension");
+    serial
+        .observe_batch_row_major_trusted_finite(&batch)
+        .expect("well-shaped batch");
+
+    let mut parallel = CovstreamCore::new(32).expect("valid dimension");
+    parallel
+        .observe_batch_row_major_parallel_trusted_finite(&batch)
+        .expect("well-shaped batch");
+
+    assert_eq!(parallel.sample_count(), serial.sample_count());
+    assert_slice_close(parallel.mean(), serial.mean(), 1e-12);
+    assert_slice_close(parallel.cov_numerator(), serial.cov_numerator(), 1e-10);
+}
+
+#[test]
+fn state_parallel_batch_matches_serial_batch_buffer() {
+    let batch: Vec<f64> = (0..(32 * 16))
+        .map(|i| ((i % 16) as f64 + 1.0) * ((i / 16) as f64 + 1.0) * 0.01)
+        .collect();
+
+    let mut serial = CovstreamState::new(16, MatrixLayout::RowMajor).expect("valid state");
+    serial
+        .observe_batch_row_major(&batch)
+        .expect("finite batch");
+
+    let mut parallel = CovstreamState::new(16, MatrixLayout::RowMajor).expect("valid state");
+    parallel
+        .observe_batch_row_major_parallel(&batch)
+        .expect("finite batch");
+
+    let serial_cov = serial
+        .covariance_buffer()
+        .expect("enough samples for covariance");
+    let parallel_cov = parallel
+        .covariance_buffer()
+        .expect("enough samples for covariance");
+
+    assert_eq!(parallel.sample_count(), serial.sample_count());
+    assert_slice_close(&parallel_cov, &serial_cov, 1e-10);
 }

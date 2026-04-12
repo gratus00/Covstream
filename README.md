@@ -1,12 +1,36 @@
 # Covstream
 
-`Covstream` is a fixed-dimension streaming covariance library with Lean-backed
-specifications and a fast Rust `f64` implementation.
+`Covstream` is a Lean-backed Rust library for fixed-dimension streaming
+covariance and Ledoit-Wolf shrinkage over `f64`.
 
-It is aimed at quant research, portfolio analytics, and other systems that need
-to keep a covariance estimate updated as new aligned vectors arrive.
+It is aimed at quant research, portfolio analytics, telemetry analytics, and
+other systems that need to keep a covariance estimate hot in memory as new
+aligned vectors arrive.
 
-## If You Only Read Three Things
+Use it when you want to:
+
+- update covariance one aligned sample at a time without rebuilding from scratch
+- ingest flat row-major batches for backtests or research jobs
+- extract either dense row-major or packed symmetric outputs
+- keep the mathematical story tied to a Lean specification without turning the
+  Rust crate into a research prototype
+
+## Installation
+
+After publishing, add the crate with:
+
+```bash
+cargo add covstream
+```
+
+Or put it directly in `Cargo.toml`:
+
+```toml
+[dependencies]
+covstream = "0.1"
+```
+
+## At A Glance
 
 - Use `CovstreamState` unless you need low-level control. It is the default
   user-facing API.
@@ -14,13 +38,16 @@ to keep a covariance estimate updated as new aligned vectors arrive.
   covariance matrices do not need dense storage.
 - Safe ingest APIs reject malformed shapes and `NaN` / `Inf`. The
   `trusted_finite` APIs are faster, but they assume upstream validation.
+- The public crate is intentionally small: numerical state, batch ingest,
+  extraction, shrinkage, examples, tests, benchmarks, and CI.
 
-## What The Rust Library Does
+## What Ships In `0.1.0`
 
 Today the Rust crate supports:
 
 - fixed-dimension streaming updates via `observe(&[f64])`
 - flat batch ingest via `observe_batch_row_major(&[f64])`
+- optional parallel batch ingest for large row-major batches
 - optional trusted-finite ingest paths for validated pipelines
 - Welford-style covariance accumulation
 - covariance extraction in:
@@ -29,6 +56,7 @@ Today the Rust crate supports:
 - Ledoit-Wolf style linear shrinkage toward the scaled-identity target `μI`
 - reusable `*_into(&mut [f64])` extraction methods
 - state reuse via `reset()`
+- a small but useful release boundary instead of an overgrown “kitchen sink”
 
 The main public types are:
 
@@ -64,6 +92,29 @@ let shrunk = state.ledoit_wolf_buffer(ShrinkageMode::ClippedAlpha(0.20))?;
 Use `CovstreamCore` when you want direct control over row-major vs packed
 extraction and lower-level ingest methods.
 
+If you are integrating `covstream` into a larger application, the usual shape
+is:
+
+1. create one fixed-dimension state per stream, portfolio, or universe
+2. call `observe` for live updates or a batch ingest method for offline work
+3. extract covariance or shrunk covariance only when a downstream consumer
+   actually needs a snapshot
+
+## Typical Use Cases
+
+Common ways a developer would use `covstream`:
+
+- live market or telemetry streams:
+  call `observe(&sample)` each time a new aligned vector arrives
+- offline backtests or research jobs:
+  load a flat row-major batch and call `observe_batch_row_major(&batch)`
+- larger batch analytics jobs:
+  use `observe_batch_row_major_parallel(&batch)` when the batch is large enough
+  that parallel reduction is worth the overhead
+- downstream optimizers and risk engines:
+  extract packed covariance buffers to avoid dense symmetric storage when the
+  consumer can work with packed layout
+
 ## Batch Ingest
 
 `observe_batch_row_major` expects a flat slice of back-to-back samples.
@@ -95,6 +146,21 @@ state.observe_batch_row_major(&batch)?;
 # Ok::<(), covstream::CovstreamError>(())
 ```
 
+For large offline or micro-batched workloads, `observe_batch_row_major_parallel`
+and `observe_batch_row_major_parallel_trusted_finite` can reduce total ingest
+time by merging per-task partial states. For small batches, the serial path is
+usually better because task scheduling overhead dominates.
+
+## Security And Safety Notes
+
+- The library API does not perform network I/O, file I/O, or subprocess
+  execution.
+- Checked ingest paths reject malformed shapes and non-finite values.
+- `trusted_finite` methods are intended only for callers that already validate
+  input upstream.
+- The only `unsafe` code is isolated to optional AArch64 SIMD leaf kernels.
+- A minimal security policy is in [SECURITY.md](./SECURITY.md).
+
 ## Examples
 
 The repository ships with three example programs:
@@ -114,26 +180,6 @@ cargo run --example streaming_covariance
 cargo run --example batch_returns
 cargo run --release --example throughput -- 64 100000
 ```
-
-## Initial Public Release Boundary
-
-The current public crate boundary is **`0.1.0`**.
-
-That release includes:
-
-- fixed-dimension streaming covariance over `f64`
-- safe and trusted-finite ingest APIs
-- flat batch ingest
-- row-major and packed upper-triangle extraction
-- Ledoit-Wolf style linear shrinkage toward `μI`
-- reusable output buffers via `*_into`
-- examples, integration tests, Criterion benchmarks, and CI
-
-It does not yet claim:
-
-- a formal floating-point refinement proof from Rust `f64` to Lean `Real`
-- dynamically changing asset dimensions inside one state object
-- CSV/network/ticker ingestion inside the core crate itself
 
 ## Numerical Contract
 
@@ -157,6 +203,17 @@ The current Rust crate does **not** claim a formal floating-point refinement
 proof against the Lean `Real` model yet. The Lean side provides the exact target
 specification and checked output contract that a future floating-point analysis
 can refine against.
+
+## Non-Claims
+
+`covstream` is intentionally narrower than a full analytics platform. The `0.1`
+crate does **not** claim:
+
+- a formal floating-point refinement proof from Rust `f64` execution to Lean
+  `Real`
+- dynamically changing asset dimensions inside a single state object
+- CSV, socket, market-data, or ticker ingestion inside the core crate
+- production order-routing, exchange connectivity, or execution-system features
 
 ## Why Shrinkage Matters
 
@@ -187,17 +244,24 @@ This stabilizes the matrix while preserving the streaming update path.
 On a local MacBook Air benchmark run on **April 10, 2026**, representative
 256-dimension medians were:
 
+Each figure is the median time for one full benchmarked call named in the
+label, not for one arithmetic primitive inside that call.
+
 - `observe/256`: about `17.4 µs`
 - `covariance_extract/packed_into/256`: about `11.0 µs`
 - `covariance_extract/row_major_into/256`: about `99.9 µs`
 - `shrinkage_extract/ledoit_wolf_packed_into/256`: about `32.5 µs`
 - `observe_batch/batch_call/d256_n256`: about `4.36 ms` total for 256 samples
+- `observe_batch_parallel/trusted/d256_n1024`: about `4.97 ms` total on the
+  same local machine, versus about `11.40 ms` for the comparable trusted serial
+  batch path
 
 The important usage patterns are:
 
 - packed output is cheaper than full row-major output
 - `*_into` methods avoid repeated output allocations
 - batch ingest improves API ergonomics and can reduce validation overhead
+- parallel batch ingest is mainly worthwhile for large `n` and moderate-to-large `k`
 - the main runtime cost is still the `O(k^2)` covariance update itself
 
 Run benchmarks with:
@@ -205,6 +269,18 @@ Run benchmarks with:
 ```bash
 cargo bench
 ```
+
+## Roadmap
+
+Near-term follow-ups that fit the current project direction:
+
+- docs.rs-facing examples and more benchmark notes for common `k`/`n` regimes
+- a thin companion transport layer or daemon example for live socket ingestion,
+  kept outside the core crate
+- additional shrinkage research and estimator comparisons when there is clear
+  user demand
+- future floating-point refinement work against the Lean specification
+  boundary
 
 ## Lean-Backed Specification
 

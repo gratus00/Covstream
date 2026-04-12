@@ -10,6 +10,7 @@ homepage = "https://github.com/gratus00/Covstream"
 documentation = "https://docs.rs/covstream"
 keywords = ["covariance", "streaming", "finance", "quant", "statistics"]
 categories = ["science", "mathematics", "algorithms"]
+exclude = ["/.github/**", "/target/**", "/.lake/**"]
 
 [lib]
 name = "covstream"
@@ -24,3 +25,6 @@ criterion = "0.5"
 [[bench]]
 name = "core_bench"
 harness = false
+
+[dependencies]
+rayon = "1"

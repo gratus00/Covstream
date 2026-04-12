@@ -122,4 +122,31 @@ impl CovstreamState {
         self.ledoit_wolf_buffer_into(mode, &mut out)?;
         Ok(out)
     }
+
+    /// Merges another state with the same dimension into `self`.
+    ///
+    /// This is useful when independent partial states are accumulated in
+    /// separate tasks and combined later.
+    pub fn merge(&mut self, other: &Self) -> Result<(), CovstreamError> {
+        self.core.merge(&other.core)
+    }
+
+    /// Ingests a flat row-major batch and uses the parallel reduction path when
+    /// the batch is large enough to benefit from it.
+    pub fn observe_batch_row_major_parallel(
+        &mut self,
+        samples: &[f64],
+    ) -> Result<(), CovstreamError> {
+        self.core.observe_batch_row_major_parallel(samples)
+    }
+
+    /// Parallel batch ingest variant that trusts the caller that all values are
+    /// finite while still enforcing batch shape checks.
+    pub fn observe_batch_row_major_parallel_trusted_finite(
+        &mut self,
+        samples: &[f64],
+    ) -> Result<(), CovstreamError> {
+        self.core
+            .observe_batch_row_major_parallel_trusted_finite(samples)
+    }
 }

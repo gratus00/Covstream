@@ -16,11 +16,14 @@ Initial public Rust crate boundary.
 - `CovstreamState` layout-aware wrapper API
 - safe single-sample ingest via `observe`
 - safe flat batch ingest via `observe_batch_row_major`
+- optional parallel flat batch ingest via partial-state reduction
 - trusted-finite ingest APIs for validated pipelines
+- `merge` support for sharded or parallel accumulation workflows
 - covariance extraction in row-major and packed upper-triangle layouts
 - Ledoit-Wolf style linear shrinkage toward `μI`
 - reusable `*_into` extraction methods to avoid repeated allocations
 - `reset()` for state reuse without reallocating buffers
+- AArch64 SIMD leaf kernels for selected vector operations
 - runnable examples:
   - `streaming_covariance`
   - `batch_returns`
@@ -28,6 +31,7 @@ Initial public Rust crate boundary.
 - integration tests and Criterion benchmarks
 - Rust CI for format, clippy, and test gates
 - Lean-backed repository documentation and Rust/Lean bridge notes
+- `SECURITY.md` and explicit crate safety notes for the public release
 
 ### Notes
 

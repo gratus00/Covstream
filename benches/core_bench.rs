@@ -1,5 +1,6 @@
 use covstream::{CovstreamCore, MatrixLayout, ShrinkageMode};
 use criterion::{black_box, criterion_group, criterion_main, BatchSize, BenchmarkId, Criterion};
+use std::time::{Duration, Instant};
 
 fn sample_for_index(dimension: usize, index: usize) -> Vec<f64> {
     let scale = (index + 1) as f64;
@@ -90,6 +91,101 @@ fn bench_observe_batch(c: &mut Criterion) {
                             state
                                 .observe_batch_row_major(black_box(&batch))
                                 .expect("finite batch");
+                            black_box(state);
+                        },
+                        BatchSize::SmallInput,
+                    );
+                },
+            );
+        }
+    }
+
+    group.finish();
+}
+
+fn bench_observe_batch_parallel(c: &mut Criterion) {
+    let mut group = c.benchmark_group("observe_batch_parallel");
+    group.sample_size(20);
+    group.warm_up_time(Duration::from_secs(1));
+
+    for &dimension in &[32usize, 128, 256, 512] {
+        for &sample_count in &[256usize, 1024] {
+            let batch = batch_for_count(dimension, sample_count);
+            let input = (dimension, sample_count);
+
+            group.bench_with_input(
+                BenchmarkId::new(
+                    format!("checked_serial/d{}_n{}", dimension, sample_count),
+                    dimension,
+                ),
+                &input,
+                |b, &(k, _)| {
+                    b.iter_batched(
+                        || CovstreamCore::new(k).expect("valid dimension"),
+                        |mut state| {
+                            state
+                                .observe_batch_row_major(black_box(&batch))
+                                .expect("finite batch");
+                            black_box(state);
+                        },
+                        BatchSize::SmallInput,
+                    );
+                },
+            );
+
+            group.bench_with_input(
+                BenchmarkId::new(
+                    format!("trusted_serial/d{}_n{}", dimension, sample_count),
+                    dimension,
+                ),
+                &input,
+                |b, &(k, _)| {
+                    b.iter_batched(
+                        || CovstreamCore::new(k).expect("valid dimension"),
+                        |mut state| {
+                            state
+                                .observe_batch_row_major_trusted_finite(black_box(&batch))
+                                .expect("well-shaped batch");
+                            black_box(state);
+                        },
+                        BatchSize::SmallInput,
+                    );
+                },
+            );
+
+            group.bench_with_input(
+                BenchmarkId::new(
+                    format!("checked_parallel/d{}_n{}", dimension, sample_count),
+                    dimension,
+                ),
+                &input,
+                |b, &(k, _)| {
+                    b.iter_batched(
+                        || CovstreamCore::new(k).expect("valid dimension"),
+                        |mut state| {
+                            state
+                                .observe_batch_row_major_parallel(black_box(&batch))
+                                .expect("finite batch");
+                            black_box(state);
+                        },
+                        BatchSize::SmallInput,
+                    );
+                },
+            );
+
+            group.bench_with_input(
+                BenchmarkId::new(
+                    format!("trusted_parallel/d{}_n{}", dimension, sample_count),
+                    dimension,
+                ),
+                &input,
+                |b, &(k, _)| {
+                    b.iter_batched(
+                        || CovstreamCore::new(k).expect("valid dimension"),
+                        |mut state| {
+                            state
+                                .observe_batch_row_major_parallel_trusted_finite(black_box(&batch))
+                                .expect("well-shaped batch");
                             black_box(state);
                         },
                         BatchSize::SmallInput,
@@ -288,13 +384,48 @@ fn bench_mixed_workload(c: &mut Criterion) {
     group.finish();
 }
 
+fn bench_observe_hot(c: &mut Criterion) {
+    let mut group = c.benchmark_group("observe_hot");
+
+    for &dimension in &[8usize, 32, 128, 256, 512] {
+        let batch = batch_for_count(dimension, 2048);
+
+        group.bench_with_input(
+            BenchmarkId::new("trusted", dimension),
+            &dimension,
+            |b, &k| {
+                b.iter_custom(|iters| {
+                    let mut state = seeded_state(k, 64);
+                    let mut sample_index = 0usize;
+                    let sample_count = batch.len() / k;
+                    let start = Instant::now();
+
+                    for _ in 0..iters {
+                        let offset = sample_index * k;
+                        state
+                            .observe_trusted_finite(black_box(&batch[offset..offset + k]))
+                            .expect("finite sample");
+                        sample_index = (sample_index + 1) % sample_count;
+                    }
+
+                    start.elapsed()
+                });
+            },
+        );
+    }
+
+    group.finish();
+}
+
 criterion_group!(
     benches,
     bench_observe,
     bench_observe_batch,
+    bench_observe_batch_parallel,
     bench_covariance_extract,
     bench_shrinkage_extract,
     bench_api_shape,
-    bench_mixed_workload
+    bench_mixed_workload,
+    bench_observe_hot,
 );
 criterion_main!(benches);

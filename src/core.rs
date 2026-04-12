@@ -1,6 +1,9 @@
-use crate::packing::{packed_index, packed_len};
-use crate::shrinkage::shrink_entry;
+use crate::kernels::{axpy_in_place, scale_into};
+use crate::packing::packed_len;
 use crate::{CovstreamError, ShrinkageMode};
+use rayon::prelude::*;
+
+const PARALLEL_MIN_WORK: usize = 1 << 18;
 
 /// Low-level fixed-dimension streaming covariance engine.
 ///
@@ -20,10 +23,21 @@ pub struct CovstreamCore {
     mean: Vec<f64>,
     cov_numerator: Vec<f64>,
     scratch_delta: Vec<f64>,
-    scratch_residual: Vec<f64>,
 }
 
 impl CovstreamCore {
+    fn new_zeroed(dimension: usize) -> Self {
+        debug_assert!(dimension > 0);
+
+        Self {
+            dimension,
+            sample_count: 0,
+            mean: vec![0.0; dimension],
+            cov_numerator: vec![0.0; packed_len(dimension)],
+            scratch_delta: vec![0.0; dimension],
+        }
+    }
+
     /// Creates a new zeroed streaming state for a fixed dimension.
     ///
     /// Returns [`CovstreamError::ZeroDimension`] when `dimension == 0`.
@@ -32,14 +46,7 @@ impl CovstreamCore {
             return Err(CovstreamError::ZeroDimension);
         }
 
-        Ok(Self {
-            dimension,
-            sample_count: 0,
-            mean: vec![0.0; dimension],
-            cov_numerator: vec![0.0; packed_len(dimension)],
-            scratch_delta: vec![0.0; dimension],
-            scratch_residual: vec![0.0; dimension],
-        })
+        Ok(Self::new_zeroed(dimension))
     }
 
     /// Returns the fixed dimension of every sample accepted by this state.
@@ -109,25 +116,23 @@ impl CovstreamCore {
         let nf = next_count as f64;
 
         for (i, value) in sample.iter().copied().enumerate() {
-            self.scratch_delta[i] = value - self.mean[i];
+            let delta = value - self.mean[i];
+            self.scratch_delta[i] = delta;
+            self.mean[i] += delta / nf;
         }
 
-        for i in 0..dimension {
-            self.mean[i] += self.scratch_delta[i] / nf;
-        }
-
-        for (i, value) in sample.iter().copied().enumerate().take(dimension) {
-            self.scratch_residual[i] = value - self.mean[i];
-        }
-
+        let residual_scale = (next_count - 1) as f64 / nf;
         let mut packed = 0;
 
         for row in 0..dimension {
-            let delta_row = self.scratch_delta[row];
-            for col in row..dimension {
-                self.cov_numerator[packed] += delta_row * self.scratch_residual[col];
-                packed += 1;
-            }
+            let len = dimension - row;
+            let scale = self.scratch_delta[row] * residual_scale;
+            axpy_in_place(
+                &mut self.cov_numerator[packed..packed + len],
+                &self.scratch_delta[row..],
+                scale,
+            );
+            packed += len;
         }
 
         self.sample_count = next_count;
@@ -186,18 +191,153 @@ impl CovstreamCore {
         &mut self,
         samples: &[f64],
     ) -> Result<(), CovstreamError> {
-        if !samples.len().is_multiple_of(self.dimension) {
+        let dimension = self.dimension;
+        if !samples.len().is_multiple_of(dimension) {
             return Err(CovstreamError::MalformedBatchInput {
-                dimension: self.dimension,
+                dimension,
                 len: samples.len(),
             });
         }
 
-        for sample in samples.chunks_exact(self.dimension) {
+        for sample in samples.chunks_exact(dimension) {
             self.observe_validated(sample);
         }
 
         Ok(())
+    }
+
+    fn observe_batch_row_major_validated(&mut self, samples: &[f64]) {
+        let dimension = self.dimension;
+        for sample in samples.chunks_exact(dimension) {
+            self.observe_validated(sample);
+        }
+    }
+
+    fn should_parallelize_batch(&self, sample_count: usize) -> bool {
+        sample_count > 1
+            && rayon::current_num_threads() > 1
+            && sample_count
+                .saturating_mul(self.dimension)
+                .saturating_mul(self.dimension)
+                >= PARALLEL_MIN_WORK
+    }
+
+    fn merge_same_dimension(&mut self, other: &Self) {
+        let dimension = self.dimension;
+
+        if other.sample_count == 0 {
+            return;
+        }
+
+        if self.sample_count == 0 {
+            self.sample_count = other.sample_count;
+            self.mean.copy_from_slice(&other.mean);
+            self.cov_numerator.copy_from_slice(&other.cov_numerator);
+            self.scratch_delta.fill(0.0);
+            return;
+        }
+
+        for i in 0..dimension {
+            self.scratch_delta[i] = other.mean[i] - self.mean[i];
+        }
+
+        axpy_in_place(&mut self.cov_numerator, &other.cov_numerator, 1.0);
+
+        let left = self.sample_count as f64;
+        let right = other.sample_count as f64;
+        let merged_count = self.sample_count + other.sample_count;
+        let merged = merged_count as f64;
+        let correction = left * right / merged;
+
+        let mut packed = 0;
+        for row in 0..dimension {
+            let len = dimension - row;
+            let scale = self.scratch_delta[row] * correction;
+            axpy_in_place(
+                &mut self.cov_numerator[packed..packed + len],
+                &self.scratch_delta[row..],
+                scale,
+            );
+            packed += len;
+        }
+
+        let right_weight = right / merged;
+        for i in 0..dimension {
+            self.mean[i] += self.scratch_delta[i] * right_weight;
+        }
+        self.sample_count = merged_count;
+    }
+
+    /// Merges another state of the same dimension into `self`.
+    ///
+    /// This is intended for parallel or sharded ingest workflows where
+    /// independent partial states are accumulated separately and combined later.
+    pub fn merge(&mut self, other: &Self) -> Result<(), CovstreamError> {
+        let dimension = self.dimension;
+
+        if dimension != other.dimension {
+            return Err(CovstreamError::WrongDimension {
+                expected: dimension,
+                got: other.dimension,
+            });
+        }
+
+        self.merge_same_dimension(other);
+        Ok(())
+    }
+
+    /// Ingests a flat row-major batch using parallel partial-state reduction
+    /// when the batch is large enough to justify it.
+    ///
+    /// Small batches still use the serial path to avoid Rayon overhead.
+    pub fn observe_batch_row_major_parallel(
+        &mut self,
+        samples: &[f64],
+    ) -> Result<(), CovstreamError> {
+        self.check_batch_row_major(samples)?;
+        self.observe_batch_row_major_parallel_trusted_finite(samples)
+    }
+
+    /// Parallel batch ingest variant that trusts the caller that all values are
+    /// finite while still enforcing batch shape checks.
+    pub fn observe_batch_row_major_parallel_trusted_finite(
+        &mut self,
+        samples: &[f64],
+    ) -> Result<(), CovstreamError> {
+        let dimension = self.dimension;
+
+        if !samples.len().is_multiple_of(dimension) {
+            return Err(CovstreamError::MalformedBatchInput {
+                dimension,
+                len: samples.len(),
+            });
+        }
+
+        let sample_count = samples.len() / dimension;
+        if !self.should_parallelize_batch(sample_count) {
+            self.observe_batch_row_major_validated(samples);
+            return Ok(());
+        }
+
+        let target_tasks = (rayon::current_num_threads() * 4).min(sample_count);
+        let chunk_samples = sample_count.div_ceil(target_tasks);
+
+        let merged = samples
+            .par_chunks(chunk_samples * dimension)
+            .map(|chunk| {
+                let mut partial = CovstreamCore::new_zeroed(dimension);
+                partial.observe_batch_row_major_validated(chunk);
+                partial
+            })
+            .reduce(
+                || CovstreamCore::new_zeroed(dimension),
+                |mut left, right| {
+                    left.merge_same_dimension(&right);
+                    left
+                },
+            );
+
+        self.merge(&merged)
     }
 
     /// Resets the state to its initial zeroed form without reallocating buffers.
@@ -206,7 +346,6 @@ impl CovstreamCore {
         self.mean.fill(0.0);
         self.cov_numerator.fill(0.0);
         self.scratch_delta.fill(0.0);
-        self.scratch_residual.fill(0.0);
     }
 
     fn covariance_denominator(&self) -> Result<f64, CovstreamError> {
@@ -219,15 +358,17 @@ impl CovstreamCore {
         Ok((self.sample_count - 1) as f64)
     }
 
-    fn diagonal_mean_from_covariance(&self, denominator: f64) -> f64 {
+    fn diagonal_mean_from_covariance(&self, inv_denominator: f64) -> f64 {
         let mut diagonal_sum = 0.0;
+        let mut packed = 0;
+        let dimension = self.dimension;
 
-        for i in 0..self.dimension {
-            let packed = packed_index(self.dimension, i, i);
+        for row in 0..dimension {
             diagonal_sum += self.cov_numerator[packed];
+            packed += dimension - row;
         }
 
-        diagonal_sum / denominator / self.dimension as f64
+        diagonal_sum * inv_denominator / dimension as f64
     }
 
     /// Writes the sample covariance matrix into a caller-provided row-major
@@ -246,21 +387,19 @@ impl CovstreamCore {
                 got: out.len(),
             });
         }
-
-        let denominator = self.covariance_denominator()?;
+        let inv_denominator = 1.0 / self.covariance_denominator()?;
+        let mut packed = 0;
 
         for row in 0..dimension {
             let row_offset = row * dimension;
 
             for col in row..dimension {
-                let packed = packed_index(dimension, row, col);
-                let value = self.cov_numerator[packed] / denominator;
-
+                let value = self.cov_numerator[packed] * inv_denominator;
                 out[row_offset + col] = value;
-
                 if row != col {
                     out[col * dimension + row] = value;
                 }
+                packed += 1;
             }
         }
 
@@ -290,12 +429,8 @@ impl CovstreamCore {
             });
         }
 
-        let denominator = self.covariance_denominator()?;
-
-        for (dst, src) in out.iter_mut().zip(self.cov_numerator.iter()) {
-            *dst = *src / denominator;
-        }
-
+        let inv_denominator = 1.0 / self.covariance_denominator()?;
+        scale_into(&mut out[..expected], &self.cov_numerator, inv_denominator);
         Ok(())
     }
 
@@ -326,21 +461,31 @@ impl CovstreamCore {
         }
 
         let alpha = mode.alpha();
-        let denominator = self.covariance_denominator()?;
-        let mu = self.diagonal_mean_from_covariance(denominator);
+        let inv_denominator = 1.0 / self.covariance_denominator()?;
+        let mu = self.diagonal_mean_from_covariance(inv_denominator);
+
+        let offdiag_scale = (1.0 - alpha) * inv_denominator;
+        let diag_scale = offdiag_scale;
+        let diag_bias = alpha * mu;
+
+        let mut packed = 0;
 
         for row in 0..dimension {
             let row_offset = row * dimension;
-
             for col in row..dimension {
-                let packed = packed_index(dimension, row, col);
-                let covariance_entry = self.cov_numerator[packed] / denominator;
-                let value = shrink_entry(covariance_entry, mu, row == col, alpha);
+                let base = self.cov_numerator[packed];
+                let value = if row == col {
+                    base * diag_scale + diag_bias
+                } else {
+                    base * offdiag_scale
+                };
 
                 out[row_offset + col] = value;
                 if row != col {
                     out[col * dimension + row] = value;
                 }
+
+                packed += 1;
             }
         }
 
@@ -371,15 +516,21 @@ impl CovstreamCore {
         }
 
         let alpha = mode.alpha();
-        let denominator = self.covariance_denominator()?;
-        let mu = self.diagonal_mean_from_covariance(denominator);
+        let inv_denominator = 1.0 / self.covariance_denominator()?;
+        let mu = self.diagonal_mean_from_covariance(inv_denominator);
+        let offdiag_scale = (1.0 - alpha) * inv_denominator;
+        let diag_bias = alpha * mu;
 
+        let mut packed = 0;
         for row in 0..dimension {
-            for col in row..dimension {
-                let packed = packed_index(dimension, row, col);
-                let covariance_entry = self.cov_numerator[packed] / denominator;
-                out[packed] = shrink_entry(covariance_entry, mu, row == col, alpha);
-            }
+            let len = dimension - row;
+            scale_into(
+                &mut out[packed..packed + len],
+                &self.cov_numerator[packed..packed + len],
+                offdiag_scale,
+            );
+            out[packed] += diag_bias;
+            packed += len;
         }
 
         Ok(())
