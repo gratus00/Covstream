@@ -241,8 +241,8 @@ This stabilizes the matrix while preserving the streaming update path.
 `Covstream` ships with Criterion benchmarks in
 [benches/core_bench.rs](./benches/core_bench.rs).
 
-On a local MacBook Air benchmark run on **April 11, 2026**, representative
-256-dimension medians were:
+On a local **MacBook Air (Apple M2, 8 CPU cores, 16 GB RAM)** benchmark run on
+**April 11, 2026**, representative 256-dimension medians were:
 
 Each figure is the median time for one full benchmarked call named in the
 label, not for one arithmetic primitive inside that call.
