@@ -41,7 +41,7 @@ covstream = "0.1"
 - The public crate is intentionally small: numerical state, batch ingest,
   extraction, shrinkage, examples, tests, benchmarks, and CI.
 
-## What Ships In `0.1.0`
+## What Ships In `0.1.1`
 
 Today the Rust crate supports:
 
@@ -259,6 +259,18 @@ Representative 256-dimension medians from two local hosts:
 | `observe_batch/batch_call/d256_n256` | `3.92 ms` | `2.15 ms` |
 | `observe_batch_parallel/trusted_serial/d256_n1024` | `21.6 ms` | `8.41 ms` |
 | `observe_batch_parallel/trusted_parallel/d256_n1024` | `8.31 ms` | `1.82 ms` |
+
+For very small fixed dimensions, the Linux desktop also shows single-update
+medians in the tens to hundreds of nanoseconds:
+
+- `observe/2`: about `48.2 ns`
+- `observe/8`: about `98.3 ns`
+- `observe/32`: about `348 ns`
+- `observe/64`: about `849 ns`
+
+These `observe/k` figures are useful as a small-d latency hook, but the
+hot-state `observe_hot/trusted/256` benchmark is more representative once the
+state already exists and the workload is not dominated by setup.
 
 The Linux desktop run also makes the batch-parallel crossover clearer:
 
