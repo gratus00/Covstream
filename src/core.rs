@@ -322,8 +322,8 @@ impl CovstreamCore {
         }
 
         let target_tasks = (rayon::current_num_threads() * TARGET_TASKS_PER_THREAD)
-        .min(sample_count.div_ceil(MIN_CHUNK_SAMPLES).max(1))
-        .min(sample_count);
+            .min(sample_count.div_ceil(MIN_CHUNK_SAMPLES).max(1))
+            .min(sample_count);
 
         let chunk_samples = sample_count.div_ceil(target_tasks);
 
