@@ -1,6 +1,6 @@
 [package]
 name = "covstream"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2021"
 license = "MIT"
 description = "Lean-backed fixed-dimension streaming covariance and Ledoit-Wolf shrinkage"
@@ -8,7 +8,7 @@ readme = "README.md"
 repository = "https://github.com/gratus00/Covstream"
 homepage = "https://github.com/gratus00/Covstream"
 documentation = "https://docs.rs/covstream"
-keywords = ["covariance", "streaming", "finance", "quant", "statistics"]
+keywords = ["covariance", "streaming", "finance", "statistics"]
 categories = ["science", "mathematics", "algorithms"]
 exclude = ["/.github/**", "/target/**", "/.lake/**", "/.codex"]
 
