@@ -41,7 +41,7 @@ covstream = "0.1"
 - The public crate is intentionally small: numerical state, batch ingest,
   extraction, shrinkage, examples, tests, benchmarks, and CI.
 
-## What Ships In `0.1.1`
+## What Ships In `0.1.2`
 
 Today the Rust crate supports:
 
